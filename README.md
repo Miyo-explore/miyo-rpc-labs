@@ -112,6 +112,13 @@ miyo-rpc check --help
 | `--help`           |       |           | Show help.                                                                                |
 | `--version`        |       |           | Print version and exit.                                                                   |
 
+> **`--method` behavior:** The HTTP connectivity check (`httpConnectivity`)
+> always runs, regardless of `--method`. The flag only filters the
+> **JSON-RPC method checks** (`getHealth`, `getNetwork`, `getLatestLedger`,
+> `getVersionInfo`). Method checks that do not match are reported as `SKIP`
+> with `evidence` set to `"Skipped: --method filter does not match this
+> check."`.
+
 ### Exit codes
 
 | Code | Meaning                                                              |
@@ -132,18 +139,9 @@ By default the tool runs every check exactly once (`--runs 1`). Use
 - **Aggregation**: across runs, the worst status wins using the precedence
   `Fail > Skip > Pass`. A single `Fail` in any run is never hidden by a `Skip`
   or `Pass` in another run.
-- **Latency statistics** are emitted only when more than one run succeeds and
-  produces timing data. They appear inside the `details` map of each check:
-
-  | Field           | Type  | Meaning                                         |
-  |-----------------|-------|-------------------------------------------------|
-  | `run_count`     | u32   | Number of runs that produced a duration for this check. |
-  | `latency_min_ms`| u64   | Minimum observed request duration (ms).         |
-  | `latency_avg_ms`| f64   | Mean observed request duration (ms).            |
-  | `latency_max_ms`| u64   | Maximum observed request duration (ms).         |
-
-  These describe the distribution of request latencies across the configured
-  runs, **not** a sustained performance benchmark.
+- **Latency statistics** are emitted inside the `details` map of each check
+  only when more than one run was requested **and** at least one run produced
+  a reques...[truncated]
 
 ### Run-count semantics
 
@@ -164,29 +162,34 @@ By default the tool runs every check exactly once (`--runs 1`). Use
 Miyo RPC Labs v0.1.0
 Endpoint: https://soroban-testnet.stellar.org
 
-  PASS httpConnectivity (142ms)
+  PASS httpConnectivity  (142ms)
     endpoint_reachable: true
     http_status: 200
+    evidence: Issued HTTP GET to https://soroban-testnet.stellar.org with timeout 15s and User-Agent 'miyo-rpc/0.1.0'.
 
-  PASS getHealth (156ms)
-    description: Node health status and ledger window bounds.
+  PASS getHealth  (156ms)
+    description: "Node health status and ledger window bounds."
     http_status: 200
     status: "healthy"
+    evidence: Sent JSON-RPC 2.0 POST to https://soroban-testnet.stellar.org with method 'getHealth' and no params.
 
-  PASS getNetwork (168ms)
-    description: Network passphrase and protocol version.
+  PASS getNetwork  (168ms)
+    description: "Network passphrase and protocol version."
     http_status: 200
     passphrase: "Public Global Stellarium..."
+    evidence: Sent JSON-RPC 2.0 POST to https://soroban-testnet.stellar.org with method 'getNetwork' and no params.
 
-  PASS getLatestLedger (178ms)
-    description: Latest known ledger sequence, hash, and close time.
+  PASS getLatestLedger  (178ms)
+    description: "Latest known ledger sequence, hash, and close time."
     http_status: 200
     sequence: 51583040
+    evidence: Sent JSON-RPC 2.0 POST to https://soroban-testnet.stellar.org with method 'getLatestLedger' and no params.
 
-  PASS getVersionInfo (52ms)
-    description: RPC server version and Captive Core version.
+  PASS getVersionInfo  (52ms)
+    description: "RPC server version and Captive Core version."
     http_status: 200
     version: "2.0.0"
+    evidence: Sent JSON-RPC 2.0 POST to https://soroban-testnet.stellar.org with method 'getVersionInfo' and no params.
 
 Summary: 5 passed, 0 failed, 0 skipped (5 ran)
 ```
@@ -197,21 +200,24 @@ Summary: 5 passed, 0 failed, 0 skipped (5 ran)
 Miyo RPC Labs v0.1.0
 Endpoint: https://soroban-testnet.stellar.org
 
-  PASS httpConnectivity (281ms)
+  PASS httpConnectivity  (281ms)
     endpoint_reachable: true
-    http_status: 200
+    http_status: 405
     latency_min_ms: 258
-    latency_avg_ms: 270
+    latency_avg_ms: 270.0
     latency_max_ms: 282
     run_count: 3
+    evidence: Issued HTTP GET to https://soroban-testnet.stellar.org with timeout 15s and User-Agent 'miyo-rpc/0.1.0'.
 
-  PASS getHealth (270ms)
-    description: Node health status and ledger window bounds.
+  PASS getHealth  (270ms)
+    description: "Node health status and ledger window bounds."
     http_status: 200
     latency_min_ms: 261
-    latency_avg_ms: 262
+    latency_avg_ms: 262.0
     latency_max_ms: 266
     run_count: 3
+    status: "healthy"
+    evidence: Sent JSON-RPC 2.0 POST to https://soroban-testnet.stellar.org with method 'getHealth' and no params.
 
   ...
 
@@ -220,6 +226,14 @@ Summary: 5 passed, 0 failed, 0 skipped (5 ran)
 ```
 
 ### JSON output
+
+All ten `CheckResult` fields are always present in JSON output. Optional
+fields that are not applicable are serialized as `null` (the JSON formatter
+does **not** use `skip_serializing_if`), so a `Pass` check still carries an
+`evidence` string and `null` `error` / `error_message`. The `error` field is
+serialized as the `IssueCategory` enum string: `Transport`, `HttpError`,
+`MalformedResponse`, `JsonRpcError`, `UnsupportedMethod`, `MissingField`, or
+`Other`.
 
 ```json
 {
@@ -237,25 +251,27 @@ Summary: 5 passed, 0 failed, 0 skipped (5 ran)
       "details": {
         "endpoint_reachable": true,
         "http_status": 200
-      }
+      },
+      "error": null,
+      "error_message": null,
+      "evidence": "Issued HTTP GET to https://soroban-testnet.stellar.org with timeout 15s and User-Agent 'miyo-rpc/0.1.0'."
     },
     {
       "name": "getVersionInfo",
       "status": "fail",
       "timestamp": "2026-10-23T12:00:00+00:00",
+      "duration_ms": null,
+      "http_status": null,
       "endpoint": "https://soroban-testnet.stellar.org",
-      "details": {
-        "description": "RPC server version and Captive Core version.",
-        "http_status": 200
-      },
-      "error": "JsonRpcError",
-      "error_message": "method not found: getVersionInfo",
-      "evidence": "..."
+      "details": null,
+      "error": "UnsupportedMethod",
+      "error_message": "JSON-RPC error -32601: method not found",
+      "evidence": "Send a JSON-RPC 2.0 POST to https://soroban-testnet.stellar.org with method 'getVersionInfo' and empty params."
     }
   ],
   "summary": {
-    "ran": 4,
-    "passed": 3,
+    "ran": 5,
+    "passed": 4,
     "failed": 1,
     "skipped": 0,
     "total_runs": 1
@@ -263,10 +279,11 @@ Summary: 5 passed, 0 failed, 0 skipped (5 ran)
 }
 ```
 
-> **Note:** Fields with `null` or empty `Option` values are omitted from the
-> JSON output (`skip_serializing_if = "Option::is_none"`), so a `Pass` check
-> has no `error`/`error_message`/`evidence` keys, and a `Fail` check typically
-> has no `details` with response data.
+> **Note:** This example is abbreviated. The real report contains five
+> `checks` entries (`httpConnectivity` plus the four JSON-RPC methods). Here,
+> two are shown inline for illustration; `summary` reflects all five: `ran`
+> counts checks that executed (`passed` + `failed`), `skipped` counts checks
+> not performed, and `total_runs` equals the top-level `runs` value.
 
 ### URL sanitization
 
