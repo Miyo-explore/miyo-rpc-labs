@@ -34,12 +34,19 @@ static SENSITIVE_KEYS: &[&str] = &[
 /// This prevents credentials embedded in the URL (e.g.
 /// `https://user:secret@host/rpc?api_key=x`) from leaking into output or
 /// logs.
-/// If the URL cannot be parsed, the original string is returned unchanged
-/// (the error will surface in the diagnostics).
+/// If the URL cannot be parsed, a best-effort redaction is attempted:
+/// userinfo and sensitive query parameters are redacted so credential-like
+/// patterns never reach output or error messages.
 pub fn sanitize_url(url: &str) -> String {
     let parsed = match url::Url::parse(url) {
         Ok(u) => u,
-        Err(_) => return url.to_string(),
+        Err(_) => {
+            // The string did not parse as a URL. Still attempt to redact
+            // credential-like userinfo and sensitive query parameters
+            // (e.g. `https://user:pass@host?api_key=x`) so secrets are
+            // never echoed in error messages or output.
+            return redact_unparseable_url(url);
+        }
     };
 
     let mut new_url = parsed;
@@ -90,6 +97,70 @@ pub fn sanitize_url(url: &str) -> String {
     } else {
         url.to_string()
     }
+}
+
+/// Best-effort redaction of credential-like patterns in strings that
+/// [`url::Url::parse`] rejects (e.g. because of an embedded space or other
+/// invalid character).
+///
+/// Handles two cases:
+/// 1. **Userinfo** — `scheme://user:pass@host` → `scheme://REDACTED:REDACTED@host`
+/// 2. **Sensitive query params** — `?api_key=secret` → `?api_key=REDACTED`
+///
+/// If no `://` separator or no `@` after it is found and no `?` is present,
+/// the string is returned unchanged.
+fn redact_unparseable_url(url: &str) -> String {
+    let mut result = url.to_string();
+
+    // 1. Redact userinfo: scheme://user:pass@host → scheme://REDACTED:REDACTED@host
+    if let Some(scheme_end) = result.find("://") {
+        let after_scheme = &result[scheme_end + 3..];
+        if let Some(at_pos) = after_scheme.find('@') {
+            let scheme = &result[..scheme_end];
+            let host_and_rest = &after_scheme[at_pos + 1..];
+            result = format!("{}://REDACTED:REDACTED@{}", scheme, host_and_rest);
+        }
+    }
+
+    // 2. Redact sensitive query parameters: ?api_key=secret → ?api_key=REDACTED
+    if let Some(q_pos) = result.find('?') {
+        let (before, query_body) = result.split_at(q_pos);
+        let query = &query_body[1..]; // skip '?'
+        let redacted = redact_sensitive_query_params(query);
+        result = format!("{}?{}", before, redacted);
+    }
+
+    result
+}
+
+/// Replace the *values* of sensitive query parameters with `REDACTED`.
+/// Parameter names that match [`SENSITIVE_KEYS`] (case-insensitive) are
+/// redacted; all others are preserved verbatim.
+fn redact_sensitive_query_params(query: &str) -> String {
+    query
+        .split('&')
+        .map(|p| {
+            if let Some(eq_pos) = p.find('=') {
+                let key = &p[..eq_pos];
+                if is_sensitive_query_key(key) {
+                    format!("{key}=REDACTED")
+                } else {
+                    p.to_string()
+                }
+            } else if is_sensitive_query_key(p) {
+                format!("{p}=REDACTED")
+            } else {
+                p.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+/// Check whether a query parameter key is in [`SENSITIVE_KEYS`]
+/// (case-insensitive).
+fn is_sensitive_query_key(key: &str) -> bool {
+    SENSITIVE_KEYS.iter().any(|s| s.eq_ignore_ascii_case(key))
 }
 
 // ────────────────────────────────

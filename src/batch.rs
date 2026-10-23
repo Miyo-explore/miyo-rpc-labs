@@ -12,7 +12,7 @@
 //! - `--runs` per endpoint is clamped to `[1, 10]`.
 
 use crate::diagnostics::DiagnosticReport;
-use crate::output::format_json;
+use crate::output::{format_json, sanitize_url};
 use crate::SCHEMA_VERSION;
 use crate::VERSION;
 use serde::{Deserialize, Serialize};
@@ -31,7 +31,7 @@ const MAX_RUNS: u32 = 10;
 /// One endpoint's result in a batch run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BatchEntry {
-    /// Sanitized endpoint URL (or the raw line if it failed to validate).
+    /// Sanitized endpoint URL (credentials redacted via [`crate::output::sanitize_url`]).
     pub endpoint: String,
     /// Whether the line parsed to a usable `http`/`https` URL.
     pub valid: bool,
@@ -111,21 +111,31 @@ pub fn parse_endpoints_file(path: &str) -> Result<Vec<String>, BatchParseError> 
     Ok(parse_endpoints(&content))
 }
 
-/// Validate one endpoint line to a sanitized `http`/`https` URL.
+/// Validate one endpoint line to an `http`/`https` URL.
+///
+/// Returns the **original** URL (not sanitized) so it can be used for actual
+/// network requests. Callers must sanitize the URL at every output boundary
+/// via [`crate::output::sanitize_url`]. This separation prevents credential
+/// loss: sanitizing before the HTTP request turns embedded credentials into
+/// `REDACTED` placeholders, breaking authentication.
 pub fn validate_endpoint(url: &str) -> Result<String, BatchParseError> {
     let parsed = Url::parse(url)
-        .map_err(|e| BatchParseError(format!("'{}': not a valid URL ({e})", url)))?;
+        .map_err(|e| BatchParseError(format!("'{}': not a valid URL ({e})", sanitize_url(url))))?;
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err(BatchParseError(format!(
             "'{}': scheme must be http or https",
-            url
+            sanitize_url(url)
         )));
     }
     if parsed.host_str().is_none() {
-        return Err(BatchParseError(format!("'{}': missing hostname", url)));
+        return Err(BatchParseError(format!(
+            "'{}': missing hostname",
+            sanitize_url(url)
+        )));
     }
-    // Reuse the URL sanitizer so secrets never reach batch output.
-    Ok(crate::output::sanitize_url(url))
+    // Return the original URL for network requests; sanitization happens
+    // at output time to preserve embedded credentials for authentication.
+    Ok(url.to_string())
 }
 
 /// Compute aggregate counts + exit code from batch entries (pure, testable).
@@ -237,14 +247,14 @@ pub async fn run_batch(args: &crate::BatchArgs) -> BatchReport {
                         .ok()
                         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
                     BatchEntry {
-                        endpoint: url,
+                        endpoint: sanitize_url(&url),
                         valid: true,
                         report: value,
                         error: None,
                     }
                 }
                 Err(e) => BatchEntry {
-                    endpoint: raw,
+                    endpoint: sanitize_url(&raw),
                     valid: false,
                     report: None,
                     error: Some(e.0),
@@ -464,5 +474,76 @@ mod tests {
                 .and_then(|v| v.as_u64()),
             Some(2)
         );
+    }
+
+    // ────────────────────────
+    // Credential-handling tests
+    // ────────────────────────
+
+    /// `validate_endpoint` must return the ORIGINAL url (with credentials
+    /// intact) so the HTTP request can authenticate. Sanitization is an
+    /// output-only concern handled in `run_batch`.
+    #[test]
+    fn test_validate_endpoint_preserves_query_credentials() {
+        let url = "https://host.example/rpc?api_key=secret123";
+        let result = validate_endpoint(url).expect("should validate");
+        assert_eq!(
+            result, url,
+            "validate_endpoint must return the original URL, not a sanitized copy"
+        );
+    }
+
+    #[test]
+    fn test_validate_endpoint_preserves_userinfo() {
+        let url = "https://user:secret123@host.example/rpc";
+        let result = validate_endpoint(url).expect("should validate");
+        assert_eq!(
+            result, url,
+            "validate_endpoint must return the original URL with userinfo intact"
+        );
+        assert!(
+            !result.contains("REDACTED"),
+            "original URL must not be pre-sanitized"
+        );
+    }
+
+    /// Error messages for invalid URLs must not leak credentials.
+    #[test]
+    fn test_validate_endpoint_error_sanitizes_query_credentials() {
+        // Wrong scheme — URL parses, but scheme is rejected.
+        let url = "ftp://user:secret@host.example/rpc?api_key=leaked";
+        let err = validate_endpoint(url).unwrap_err();
+        assert!(!err.0.contains("leaked"), "error leaks api_key: {}", err.0);
+        assert!(
+            !err.0.contains("secret"),
+            "error leaks userinfo password: {}",
+            err.0
+        );
+        assert!(
+            err.0.contains("REDACTED"),
+            "error should contain REDACTED: {}",
+            err.0
+        );
+    }
+
+    #[test]
+    fn test_validate_endpoint_error_sanitizes_malformed_with_credentials() {
+        // Unparseable URL with apparent userinfo.
+        let url = "https://user:secret@bad host.example/rpc";
+        let err = validate_endpoint(url).unwrap_err();
+        assert!(!err.0.contains("secret"), "error leaks password: {}", err.0);
+        assert!(
+            err.0.contains("REDACTED"),
+            "error should contain REDACTED: {}",
+            err.0
+        );
+    }
+
+    /// Existing sanitization behavior must remain correct after the fallback
+    /// enhancement for unparseable URLs.
+    #[test]
+    fn test_sanitize_url_malformed_no_credentials_unchanged() {
+        let url = "not a url at all";
+        assert_eq!(crate::output::sanitize_url(url), url);
     }
 }

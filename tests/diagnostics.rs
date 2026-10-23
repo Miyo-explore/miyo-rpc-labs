@@ -1341,3 +1341,207 @@ async fn test_batch_all_invalid_exit_2() {
     assert_eq!(report.summary.exit_code, 2);
     let _ = std::fs::remove_file(&path);
 }
+
+// ────────────────────────────────
+// Batch credential-handling tests
+// ────────────────────────────────
+
+/// A valid URL with a sensitive query parameter must be used verbatim for
+/// network requests (so the API key reaches the server) while every output
+/// surface must redact it.
+#[tokio::test]
+async fn test_batch_query_credentials_preserved_in_request_sanitized_in_output() {
+    let mut server = mockito::Server::new_async().await;
+    let mock_url = format!("{}?api_key=secret123", server.url());
+
+    // GET mock for httpConnectivity — matches any query string.
+    server
+        .mock("GET", "/")
+        .with_status(200)
+        .create_async()
+        .await;
+
+    // POST mock for getHealth — only matches if the ORIGINAL api_key is
+    // present. If the sanitized URL (api_key=REDACTED) were used for the
+    // request, this mock would NOT match and getHealth would fail.
+    server
+        .mock("POST", "/")
+        .match_query(mockito::Matcher::Regex("api_key=secret123".to_string()))
+        .match_body(mockito::Matcher::Regex(
+            r#""method":"getHealth""#.to_string(),
+        ))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(json_body(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "status": "healthy",
+                "latestLedger": 51583040,
+                "oldestLedger": 51565760,
+                "ledgerRetentionWindow": 17281
+            }
+        })))
+        .create_async()
+        .await;
+
+    let mut path = std::env::temp_dir();
+    path.push("miyo_batch_qcreds.txt");
+    std::fs::write(&path, &mock_url).unwrap();
+
+    let args = BatchArgs {
+        file: path.to_string_lossy().to_string(),
+        output: OutputFormat::Json,
+        timeout_secs: 5,
+        runs: 1,
+        method: Some("getHealth".to_string()),
+        concurrency: 1,
+        expected_network: None,
+    };
+    let report = miyo_rpc::run_batch(&args).await;
+
+    // getHealth must PASS — proving the original URL (with the real api_key)
+    // was used for the HTTP request, not the sanitized one.
+    let entry = &report.endpoints[0];
+    assert!(entry.valid, "endpoint should be valid");
+    let checks = entry
+        .report
+        .as_ref()
+        .and_then(|r| r.get("checks"))
+        .and_then(|c| c.as_array())
+        .expect("checks array");
+    let health = checks
+        .iter()
+        .find(|c| c.get("name").and_then(|v| v.as_str()) == Some("getHealth"))
+        .expect("getHealth check present");
+    assert_eq!(
+        health.get("status").and_then(|v| v.as_str()),
+        Some("pass"),
+        "getHealth should pass — original URL with credentials must be used for requests"
+    );
+
+    // Output surfaces must be sanitized.
+    let json = miyo_rpc::format_batch_json(&report).unwrap();
+    assert!(
+        !json.contains("secret123"),
+        "JSON output must not contain raw secret: {}",
+        json
+    );
+    assert!(json.contains("REDACTED"), "JSON should contain REDACTED");
+    assert!(
+        !entry.endpoint.contains("secret123"),
+        "BatchEntry.endpoint must not contain raw secret"
+    );
+    assert!(entry.endpoint.contains("REDACTED"));
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Invalid URLs containing apparent credentials must not leak secrets in
+/// error messages, JSON reports, or human-readable output.
+#[tokio::test]
+async fn test_batch_invalid_url_credentials_no_leak_json() {
+    // ftp:// with userinfo + sensitive query param → wrong scheme, but URL parses.
+    let input = "ftp://user:secret@host.example/rpc?api_key=leaked";
+
+    let mut path = std::env::temp_dir();
+    path.push("miyo_batch_bad_creds.txt");
+    std::fs::write(&path, input).unwrap();
+
+    let args = BatchArgs {
+        file: path.to_string_lossy().to_string(),
+        output: OutputFormat::Json,
+        timeout_secs: 5,
+        runs: 1,
+        method: None,
+        concurrency: 1,
+        expected_network: None,
+    };
+    let report = miyo_rpc::run_batch(&args).await;
+    let json = miyo_rpc::format_batch_json(&report).unwrap();
+
+    assert!(!report.endpoints[0].valid);
+
+    // Neither the password nor the api_key value may appear anywhere in JSON.
+    assert!(!json.contains("secret"), "JSON leaks password: {}", json);
+    assert!(
+        !json.contains("leaked"),
+        "JSON leaks api_key value: {}",
+        json
+    );
+    assert!(json.contains("REDACTED"), "JSON should contain REDACTED");
+    assert!(
+        !report.endpoints[0].endpoint.contains("secret"),
+        "endpoint field must not leak password"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn test_batch_invalid_url_credentials_no_leak_human() {
+    let input = "ftp://user:secret@host.example/rpc?api_key=leaked";
+
+    let mut path = std::env::temp_dir();
+    path.push("miyo_batch_bad_creds_human.txt");
+    std::fs::write(&path, input).unwrap();
+
+    let args = BatchArgs {
+        file: path.to_string_lossy().to_string(),
+        output: OutputFormat::Human,
+        timeout_secs: 5,
+        runs: 1,
+        method: None,
+        concurrency: 1,
+        expected_network: None,
+    };
+    let report = miyo_rpc::run_batch(&args).await;
+    let human = miyo_rpc::format_batch_human(&report);
+
+    assert!(
+        !human.contains("secret"),
+        "human output leaks password: {}",
+        human
+    );
+    assert!(
+        !human.contains("leaked"),
+        "human output leaks api_key: {}",
+        human
+    );
+    assert!(
+        human.contains("REDACTED"),
+        "human output should contain REDACTED"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Unparseable URL strings that contain apparent userinfo must also be
+/// redacted in batch output (defense-in-depth for malformed input).
+#[tokio::test]
+async fn test_batch_unparseable_url_credentials_redacted() {
+    let input = "https://user:secret@bad host.example/rpc?api_key=leaked\n";
+
+    let mut path = std::env::temp_dir();
+    path.push("miyo_batch_unparseable.txt");
+    std::fs::write(&path, input).unwrap();
+
+    let args = BatchArgs {
+        file: path.to_string_lossy().to_string(),
+        output: OutputFormat::Json,
+        timeout_secs: 5,
+        runs: 1,
+        method: None,
+        concurrency: 1,
+        expected_network: None,
+    };
+    let report = miyo_rpc::run_batch(&args).await;
+    let json = miyo_rpc::format_batch_json(&report).unwrap();
+
+    assert!(!report.endpoints[0].valid);
+    assert!(!json.contains("secret"), "JSON leaks password: {}", json);
+    assert!(!json.contains("leaked"), "JSON leaks api_key: {}", json);
+    assert!(json.contains("REDACTED"));
+
+    let _ = std::fs::remove_file(&path);
+}
