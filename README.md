@@ -128,7 +128,9 @@ $VERSION = "0.1.0"
 $TARGET  = "x86_64-pc-windows-msvc"
 Invoke-WebRequest "https://github.com/Miyo-explore/miyo-rpc-labs/releases/download/v$VERSION/miyo-rpc-v$VERSION-$TARGET.tar.gz" -OutFile "miyo-rpc-v$VERSION-$TARGET.tar.gz"
 Invoke-WebRequest "https://github.com/Miyo-explore/miyo-rpc-labs/releases/download/v$VERSION/miyo-rpc-v$VERSION-$TARGET.tar.gz.sha256" -OutFile "miyo-rpc-v$VERSION-$TARGET.tar.gz.sha256"
-Get-FileHash "miyo-rpc-v$VERSION-$TARGET.tar.gz" -Algorithm SHA256   # compare to .sha256 contents
+$expected = (Get-Content "miyo-rpc-v$VERSION-$TARGET.tar.gz.sha256" -Raw).Split()[0].Trim().ToLower()
+$actual = (Get-FileHash "miyo-rpc-v$VERSION-$TARGET.tar.gz" -Algorithm SHA256).Hash.ToLower()
+if ($expected -ne $actual) { "checksum MISMATCH"; exit 1 } else { "checksum OK" }
 tar -xzf "miyo-rpc-v$VERSION-$TARGET.tar.gz"; .\miyo-rpc.exe --version
 ```
 
