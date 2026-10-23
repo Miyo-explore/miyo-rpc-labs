@@ -594,4 +594,57 @@ mod tests {
         assert!(sanitized.contains("secret_key=REDACTED"));
         assert!(sanitized.contains("token=REDACTED"));
     }
+
+    /// Bare secret-like tokens without URL structure must be redacted.
+    #[test]
+    fn test_sanitize_url_bare_secret_prefix_redacted() {
+        let input = "sk-abc123token";
+        let sanitized = crate::output::sanitize_url(input);
+        assert!(
+            !sanitized.contains("sk-abc123token"),
+            "bare secret leaked: {sanitized}"
+        );
+        assert!(sanitized.contains("REDACTED"));
+    }
+
+    /// Composite sensitive keys (e.g. "my_secret") must be redacted.
+    #[test]
+    fn test_sanitize_url_composite_sensitive_key_redacted() {
+        let input = "my_secret=s3cr3tvalue&foo=bar";
+        let sanitized = crate::output::sanitize_url(input);
+        assert!(
+            !sanitized.contains("s3cr3tvalue"),
+            "composite key value leaked: {sanitized}"
+        );
+        assert!(sanitized.contains("my_secret=REDACTED"));
+        assert!(sanitized.contains("foo=bar"));
+    }
+
+    /// URL-encoded sensitive parameter names in unparseable URLs.
+    #[test]
+    fn test_sanitize_url_decoded_sensitive_param_name() {
+        // Unparseable URL (space in host) with URL-encoded api_key
+        let input = "https://user:pass@bad host?api%5fkey=leaked";
+        let sanitized = crate::output::sanitize_url(input);
+        assert!(
+            !sanitized.contains("leaked"),
+            "encoded param value leaked: {sanitized}"
+        );
+        assert!(sanitized.contains("REDACTED"));
+    }
+
+    /// Non-sensitive values must remain completely unchanged.
+    #[test]
+    fn test_sanitize_url_non_sensitive_preserved() {
+        let input = "my-fancy-node";
+        let sanitized = crate::output::sanitize_url(input);
+        assert_eq!(sanitized, input, "non-sensitive string should be unchanged");
+
+        // Non-sensitive query param in unparseable URL
+        let input2 = "https://bad host?foo=bar&sort=asc";
+        let sanitized2 = crate::output::sanitize_url(input2);
+        assert!(sanitized2.contains("foo=bar"), "non-sensitive param should be preserved: {sanitized2}");
+        assert!(sanitized2.contains("sort=asc"), "non-sensitive param should be preserved: {sanitized2}");
+        assert!(!sanitized2.contains("REDACTED"), "non-sensitive params should not be redacted: {sanitized2}");
+    }
 }

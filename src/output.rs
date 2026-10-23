@@ -36,8 +36,9 @@ static SENSITIVE_KEYS: &[&str] = &[
 /// `https://user:secret@host/rpc?api_key=x`) from leaking into output or
 /// logs.
 /// If the URL cannot be parsed, a best-effort redaction is attempted:
-/// userinfo and sensitive query parameters are redacted so credential-like
-/// patterns never reach output or error messages.
+/// credential-like userinfo, sensitive query parameters, raw key=value
+/// pairs, and bare secret tokens are redacted so credential-like patterns
+/// never reach output or error messages.
 pub fn sanitize_url(url: &str) -> String {
     let parsed = match url::Url::parse(url) {
         Ok(u) => u,
@@ -75,7 +76,7 @@ pub fn sanitize_url(url: &str) -> String {
         let mut new_query_parts: Vec<String> = Vec::new();
 
         for (k, v) in &pairs {
-            if SENSITIVE_KEYS.iter().any(|s| s.eq_ignore_ascii_case(k)) {
+            if is_sensitive_composite_key(k) {
                 new_query_parts.push(format!("{}=REDACTED", urlencoding::encode(k)));
                 changed = true;
             } else {
@@ -139,37 +140,61 @@ fn redact_unparseable_url(url: &str) -> String {
         result = redact_raw_key_value_pairs(&result);
     }
 
+    // 4. If no URL structure is present and the string looks like a bare
+    // secret token (e.g. "sk-abc123", "0x1234..."), redact it entirely.
+    // This catches raw API keys or tokens pasted as endpoint lines.
+    if result.find("://").is_none()
+        && result.find('?').is_none()
+        && result.find('=').is_none()
+        && looks_like_secret(url)
+    {
+        return "REDACTED".to_string();
+    }
+
     result
 }
 
 /// Replace the *values* of sensitive query parameters with `REDACTED`.
-/// Parameter names that match [`SENSITIVE_KEYS`] (case-insensitive) are
-/// redacted; all others are preserved verbatim.
+/// Parameter names are URL-decoded before checking against
+/// [`SENSITIVE_KEYS`] (so `api%5fkey` matches `api_key`), then matched
+/// as a composite key whose underscore/dash/dot-separated components
+/// include a sensitive key (e.g. `my_secret` → component `secret`).
+/// Non-sensitive pairs are preserved verbatim.
 fn redact_sensitive_query_params(query: &str) -> String {
     query
         .split('&')
         .map(|p| {
             if let Some(eq_pos) = p.find('=') {
                 let key = &p[..eq_pos];
-                if is_sensitive_query_key(key) {
+                let decoded = urlencoding::decode(key);
+                if is_sensitive_composite_key(decoded.as_ref()) {
                     format!("{key}=REDACTED")
                 } else {
                     p.to_string()
                 }
-            } else if is_sensitive_query_key(p) {
-                format!("{p}=REDACTED")
             } else {
-                p.to_string()
+                let decoded = urlencoding::decode(p);
+                if is_sensitive_composite_key(decoded.as_ref()) {
+                    format!("{p}=REDACTED")
+                } else {
+                    p.to_string()
+                }
             }
         })
         .collect::<Vec<_>>()
         .join("&")
 }
 
-/// Check whether a query parameter key is in [`SENSITIVE_KEYS`]
-/// (case-insensitive).
-fn is_sensitive_query_key(key: &str) -> bool {
+/// Check whether a key is sensitive — exact match against [`SENSITIVE_KEYS`]
+/// (case-insensitive) or any underscore/dash/dot-separated component is a
+/// sensitive key (e.g. `my_secret` → component `secret` is sensitive).
+fn is_sensitive_composite_key(key: &str) -> bool {
     SENSITIVE_KEYS.iter().any(|s| s.eq_ignore_ascii_case(key))
+        || key
+            .split(|c: char| c == '_' || c == '-' || c == '.')
+            .any(|part| {
+                !part.is_empty() && SENSITIVE_KEYS.iter().any(|s| s.eq_ignore_ascii_case(part))
+            })
 }
 
 /// Redact the values of `key=value` pairs in a non-URL string where the
@@ -184,7 +209,7 @@ fn redact_raw_key_value_pairs(input: &str) -> String {
         .map(|p| {
             if let Some(eq_pos) = p.find('=') {
                 let key = &p[..eq_pos];
-                if is_sensitive_query_key(key) {
+                if is_sensitive_composite_key(key) {
                     format!("{key}=REDACTED")
                 } else {
                     p.to_string()
@@ -195,6 +220,21 @@ fn redact_raw_key_value_pairs(input: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("&")
+}
+
+/// Check if a bare string (no URL structure) looks like a secret token
+/// based on common prefixes or format patterns.
+fn looks_like_secret(s: &str) -> bool {
+    // Common secret key prefixes (Stripe, Privy, etc.) — require minimum
+    // length to avoid redacting short strings.
+    let has_prefix = s.starts_with("sk-") || s.starts_with("pk-") || s.starts_with("0x");
+    let long_enough = s.len() >= 10;
+
+    // Long hex string without dots (e.g. Ethereum key, API token).
+    let is_long_hex =
+        s.len() >= 32 && s.chars().all(|c: char| c.is_ascii_hexdigit()) && !s.contains('.');
+
+    (has_prefix && long_enough) || is_long_hex
 }
 
 // ────────────────────────────────

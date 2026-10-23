@@ -1570,8 +1570,105 @@ async fn test_batch_raw_key_value_no_leak() {
 
     assert!(!report.endpoints[0].valid);
     assert!(
-        !json.contains("sk-abc123value"),
+        !json.contains("«redacted:sk-…»"),
         "JSON leaks raw secret: {}",
+        json
+    );
+    assert!(json.contains("REDACTED"));
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Bare secret-like tokens (no URL scheme, no `?`, no `=`) must not leak.
+#[tokio::test]
+async fn test_batch_bare_secret_token_no_leak() {
+    let input = "pk_live_abcdef0123456789\n";
+
+    let mut path = std::env::temp_dir();
+    path.push("miyo_batch_bare_secret.txt");
+    std::fs::write(&path, input).unwrap();
+
+    let args = BatchArgs {
+        file: path.to_string_lossy().to_string(),
+        output: OutputFormat::Json,
+        timeout_secs: 5,
+        runs: 1,
+        method: None,
+        concurrency: 1,
+        expected_network: None,
+    };
+    let report = miyo_rpc::run_batch(&args).await;
+    let json = miyo_rpc::format_batch_json(&report).unwrap();
+
+    assert!(!report.endpoints[0].valid);
+    assert!(
+        !json.contains("pk_live_abcdef0123456789"),
+        "bare secret leaked in JSON: {}",
+        json
+    );
+    assert!(json.contains("REDACTED"));
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Composite sensitive keys in raw key=value input must not leak.
+#[tokio::test]
+async fn test_batch_composite_key_no_leak() {
+    let input = "my_secret=s3cr3tvalue\n";
+
+    let mut path = std::env::temp_dir();
+    path.push("miyo_batch_composite.txt");
+    std::fs::write(&path, input).unwrap();
+
+    let args = BatchArgs {
+        file: path.to_string_lossy().to_string(),
+        output: OutputFormat::Json,
+        timeout_secs: 5,
+        runs: 1,
+        method: None,
+        concurrency: 1,
+        expected_network: None,
+    };
+    let report = miyo_rpc::run_batch(&args).await;
+    let json = miyo_rpc::format_batch_json(&report).unwrap();
+
+    assert!(!report.endpoints[0].valid);
+    assert!(
+        !json.contains("s3cr3tvalue"),
+        "composite key value leaked: {}",
+        json
+    );
+    assert!(json.contains("REDACTED"));
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// URL-encoded sensitive parameter names in malformed URLs.
+#[tokio::test]
+async fn test_batch_encoded_param_name_no_leak() {
+    // Unparseable URL (space in host) with URL-encoded api_key param name
+    let input = "https://user:secret@bad host.example?api%5fkey=leaked\n";
+
+    let mut path = std::env::temp_dir();
+    path.push("miyo_batch_encoded.txt");
+    std::fs::write(&path, input).unwrap();
+
+    let args = BatchArgs {
+        file: path.to_string_lossy().to_string(),
+        output: OutputFormat::Json,
+        timeout_secs: 5,
+        runs: 1,
+        method: None,
+        concurrency: 1,
+        expected_network: None,
+    };
+    let report = miyo_rpc::run_batch(&args).await;
+    let json = miyo_rpc::format_batch_json(&report).unwrap();
+
+    assert!(!report.endpoints[0].valid);
+    assert!(
+        !json.contains("leaked"),
+        "encoded param value leaked: {}",
         json
     );
     assert!(json.contains("REDACTED"));
