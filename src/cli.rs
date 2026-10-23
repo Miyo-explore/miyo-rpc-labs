@@ -36,6 +36,8 @@ pub enum OutputFormat {
 pub enum Commands {
     /// Run diagnostic checks against a Stellar RPC endpoint.
     Check(CheckArgs),
+    /// Diagnose multiple Stellar RPC endpoints listed in a file.
+    Batch(BatchArgs),
 }
 
 #[derive(Debug, Clone, Parser)]
@@ -63,4 +65,47 @@ pub struct CheckArgs {
     /// reliability and latency distribution.
     #[arg(short = 'n', long = "runs", default_value_t = 1)]
     pub runs: u32,
+
+    /// Validate the endpoint's `getNetwork` passphrase against a known
+    /// network (`testnet` or `mainnet`). A mismatch is reported as a FAIL.
+    #[arg(long, value_name = "NETWORK")]
+    pub expected_network: Option<String>,
+
+    /// Compare the primary endpoint's network identity and latest ledger
+    /// against a second endpoint (`<URL>`). Divergences are appended as
+    /// `evidence` on the relevant checks (informational; not a failure).
+    #[arg(long, value_name = "URL")]
+    pub compare: Option<String>,
+}
+
+/// Arguments for the `batch` subcommand (multiple endpoints from a file).
+#[derive(Debug, Clone, Parser)]
+pub struct BatchArgs {
+    /// File with one endpoint URL per line. Blank lines and `#` comments are ignored.
+    #[arg(short, long, value_name = "FILE")]
+    pub file: String,
+
+    /// Output format: 'human' (default) or 'json'.
+    #[arg(short, long, value_enum, default_value = "human")]
+    pub output: OutputFormat,
+
+    /// Request timeout per endpoint in seconds (default: 15).
+    #[arg(short = 't', long, default_value_t = 15)]
+    pub timeout_secs: u64,
+
+    /// Number of diagnostic runs per endpoint (default: 1, max: 10).
+    #[arg(short = 'n', long = "runs", default_value_t = 1)]
+    pub runs: u32,
+
+    /// RPC method to test in isolation (e.g. getHealth). Runs only that check.
+    #[arg(short = 'm', long, value_name = "METHOD")]
+    pub method: Option<String>,
+
+    /// Maximum endpoints to diagnose concurrently (default: 8, clamped to [1, 32]).
+    #[arg(long, default_value_t = 8)]
+    pub concurrency: usize,
+
+    /// Validate each endpoint's `getNetwork` passport against a known network.
+    #[arg(long, value_name = "NETWORK")]
+    pub expected_network: Option<String>,
 }

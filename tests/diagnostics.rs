@@ -3,7 +3,10 @@
 //! All tests use `mockito` to spin up a local HTTP server that returns
 //! deterministic JSON-RPC responses. No live Stellar endpoint is required.
 
-use miyo_rpc::{sanitize_url, CheckStatus, DiagnosticReport, RpcClient, RpcClientConfig};
+use miyo_rpc::{
+    sanitize_url, BatchArgs, CheckStatus, DiagnosticReport, OutputFormat, RpcClient,
+    RpcClientConfig,
+};
 use serde_json::{json, Value};
 use std::time::Duration;
 
@@ -910,4 +913,765 @@ async fn test_client_init_failure_reports_one_run() {
         assert_eq!(c.status, miyo_rpc::CheckStatus::Fail);
     }
     assert!(!report.endpoint.contains("secret"));
+}
+
+/// Helper: build a minimal report whose single check is `getNetwork`.
+fn build_network_report(
+    passphrase: Option<&str>,
+    status: miyo_rpc::CheckStatus,
+) -> miyo_rpc::DiagnosticReport {
+    let mut details = serde_json::Map::new();
+    details.insert(
+        "description".to_string(),
+        serde_json::Value::String("Network passphrase and protocol version.".to_string()),
+    );
+    if let Some(p) = passphrase {
+        details.insert(
+            "passphrase".to_string(),
+            serde_json::Value::String(p.to_string()),
+        );
+    }
+    let error = if status == miyo_rpc::CheckStatus::Fail {
+        Some(miyo_rpc::IssueCategory::HttpError)
+    } else {
+        None
+    };
+    miyo_rpc::DiagnosticReport {
+        tool_version: "0.1.0".to_string(),
+        endpoint: "https://example.com".to_string(),
+        runs: 1,
+        summary: miyo_rpc::ReportSummary {
+            ran: 1,
+            passed: 1,
+            failed: 0,
+            skipped: 0,
+            total_runs: 1,
+        },
+        checks: vec![miyo_rpc::CheckResult {
+            name: "getNetwork".to_string(),
+            status,
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+            duration_ms: Some(100),
+            http_status: Some(200),
+            endpoint: "https://example.com".to_string(),
+            details: Some(details),
+            error,
+            error_message: None,
+            evidence: Some("Sent JSON-RPC 2.0 POST...".to_string()),
+        }],
+    }
+}
+
+#[test]
+fn test_enforce_expected_network_match() {
+    let mut report = build_network_report(
+        Some("Test SDF Network ; February 2023"),
+        miyo_rpc::CheckStatus::Pass,
+    );
+    report.enforce_expected_network(Some("testnet"));
+    assert_eq!(report.checks[0].status, miyo_rpc::CheckStatus::Pass);
+    assert_eq!(report.summary.passed, 1);
+    assert_eq!(report.summary.failed, 0);
+    assert_eq!(report.summary.ran, 1);
+}
+
+#[test]
+fn test_enforce_expected_network_mismatch() {
+    let mut report = build_network_report(
+        Some("Evil Network That Is Not Testnet"),
+        miyo_rpc::CheckStatus::Pass,
+    );
+    report.enforce_expected_network(Some("testnet"));
+    assert_eq!(report.checks[0].status, miyo_rpc::CheckStatus::Fail);
+    assert_eq!(report.checks[0].error, Some(miyo_rpc::IssueCategory::Other));
+    assert!(
+        report.checks[0]
+            .error_message
+            .as_ref()
+            .unwrap()
+            .contains("passphrase mismatch"),
+        "got: {:?}",
+        report.checks[0].error_message
+    );
+    // Summary recomputed after downgrade.
+    assert_eq!(report.summary.passed, 0);
+    assert_eq!(report.summary.failed, 1);
+    assert_eq!(report.summary.ran, 1);
+}
+
+#[test]
+fn test_enforce_expected_network_no_getnetwork_check() {
+    let mut report = miyo_rpc::DiagnosticReport {
+        tool_version: "0.1.0".to_string(),
+        endpoint: "https://example.com".to_string(),
+        runs: 1,
+        summary: miyo_rpc::ReportSummary {
+            ran: 1,
+            passed: 1,
+            failed: 0,
+            skipped: 0,
+            total_runs: 1,
+        },
+        checks: vec![miyo_rpc::CheckResult {
+            name: "getHealth".to_string(),
+            status: miyo_rpc::CheckStatus::Pass,
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+            duration_ms: Some(50),
+            http_status: Some(200),
+            endpoint: "https://example.com".to_string(),
+            details: None,
+            error: None,
+            error_message: None,
+            evidence: Some("Sent JSON-RPC 2.0 POST...".to_string()),
+        }],
+    };
+    // No getNetwork check present — enforcement is a no-op, summary unchanged.
+    report.enforce_expected_network(Some("testnet"));
+    assert_eq!(report.checks[0].name, "getHealth");
+    assert_eq!(report.checks[0].status, miyo_rpc::CheckStatus::Pass);
+    assert_eq!(report.summary.failed, 0);
+}
+
+#[test]
+fn test_enforce_expected_network_already_failed() {
+    // getNetwork already Fail (HttpError) — must not be overwritten to Other.
+    let mut report = build_network_report(None, miyo_rpc::CheckStatus::Fail);
+    report.enforce_expected_network(Some("testnet"));
+    assert_eq!(report.checks[0].status, miyo_rpc::CheckStatus::Fail);
+    assert_eq!(
+        report.checks[0].error,
+        Some(miyo_rpc::IssueCategory::HttpError)
+    );
+    assert_eq!(report.summary.failed, 1);
+}
+
+/// Build a deterministic report with a populated `getNetwork` and
+/// `getLatestLedger` check (both Pass) for schema/convergence assertions.
+fn build_report(passport: &str, seq: &str, hash: &str) -> miyo_rpc::DiagnosticReport {
+    let mut net_details = serde_json::Map::new();
+    net_details.insert(
+        "passphrase".to_string(),
+        serde_json::Value::String(passport.to_string()),
+    );
+    let mut ledger_details = serde_json::Map::new();
+    ledger_details.insert(
+        "sequence".to_string(),
+        serde_json::Value::String(seq.to_string()),
+    );
+    ledger_details.insert(
+        "id".to_string(),
+        serde_json::Value::String(hash.to_string()),
+    );
+    miyo_rpc::DiagnosticReport {
+        tool_version: "0.1.0".to_string(),
+        endpoint: "https://example.com".to_string(),
+        runs: 1,
+        summary: miyo_rpc::ReportSummary {
+            ran: 2,
+            passed: 2,
+            failed: 0,
+            skipped: 0,
+            total_runs: 1,
+        },
+        checks: vec![
+            miyo_rpc::CheckResult {
+                name: "getNetwork".to_string(),
+                status: miyo_rpc::CheckStatus::Pass,
+                timestamp: "2026-01-01T00:00:00Z".to_string(),
+                duration_ms: Some(50),
+                http_status: Some(200),
+                endpoint: "https://example.com".to_string(),
+                details: Some(net_details),
+                error: None,
+                error_message: None,
+                evidence: Some("Sent JSON-RPC 2.0 POST to getNetwork.".to_string()),
+            },
+            miyo_rpc::CheckResult {
+                name: "getLatestLedger".to_string(),
+                status: miyo_rpc::CheckStatus::Pass,
+                timestamp: "2026-01-01T00:00:00Z".to_string(),
+                duration_ms: Some(50),
+                http_status: Some(200),
+                endpoint: "https://example.com".to_string(),
+                details: Some(ledger_details),
+                error: None,
+                error_message: None,
+                evidence: Some("Sent JSON-RPC 2.0 POST to getLatestLedger.".to_string()),
+            },
+        ],
+    }
+}
+
+#[test]
+fn test_json_schema_version_and_field_types() {
+    let mut details = serde_json::Map::new();
+    details.insert(
+        "sequence".to_string(),
+        serde_json::Value::String("100".to_string()),
+    );
+    details.insert(
+        "id".to_string(),
+        serde_json::Value::String("abc123def456".to_string()),
+    );
+    let report = miyo_rpc::DiagnosticReport {
+        tool_version: "0.1.0".to_string(),
+        endpoint: "https://example.com".to_string(),
+        runs: 3,
+        summary: miyo_rpc::ReportSummary {
+            ran: 3,
+            passed: 1,
+            failed: 0,
+            skipped: 0,
+            total_runs: 3,
+        },
+        checks: vec![miyo_rpc::CheckResult {
+            name: "getLatestLedger".to_string(),
+            status: miyo_rpc::CheckStatus::Pass,
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+            duration_ms: Some(100),
+            http_status: Some(200),
+            endpoint: "https://example.com".to_string(),
+            details: Some(details),
+            error: None,
+            error_message: None,
+            evidence: Some(
+                "Sent JSON-RPC 2.0 POST. Ledger sequence 100, hash abc: \
+                 unchanged across 3 runs — possibly stale endpoint."
+                    .to_string(),
+            ),
+        }],
+    };
+
+    let json_output = miyo_rpc::output::format_json(&report).expect("JSON serialization");
+    let parsed: serde_json::Value = serde_json::from_str(&json_output).expect("valid JSON");
+
+    // schema_version is present with the expected value. Field order is not
+    // guaranteed without serde_json's `preserve_order` feature, so we assert
+    // presence + value only.
+    assert_eq!(
+        parsed.get("schema_version").and_then(|v| v.as_str()),
+        Some("1.0")
+    );
+
+    // Stable field types.
+    assert_eq!(parsed.get("runs").and_then(|v| v.as_u64()), Some(3));
+    let checks = parsed
+        .get("checks")
+        .and_then(|v| v.as_array())
+        .expect("checks is an array");
+    assert_eq!(checks.len(), 1);
+    let check = &checks[0];
+    assert_eq!(
+        check.get("name").and_then(|v| v.as_str()),
+        Some("getLatestLedger")
+    );
+    assert_eq!(check.get("status").and_then(|v| v.as_str()), Some("pass"));
+    assert_eq!(check.get("duration_ms").and_then(|v| v.as_u64()), Some(100));
+    assert_eq!(
+        check.get("http_status").and_then(|v| v.as_u64()),
+        Some(200u64)
+    );
+    assert_eq!(
+        check.get("evidence").and_then(|v| v.as_str()),
+        Some(
+            "Sent JSON-RPC 2.0 POST. Ledger sequence 100, hash abc: \
+unchanged across 3 runs — possibly stale endpoint."
+        )
+    );
+    assert_eq!(
+        parsed
+            .get("summary")
+            .and_then(|v| v.get("passed"))
+            .and_then(|v| v.as_u64()),
+        Some(1)
+    );
+}
+
+#[test]
+fn test_json_includes_ledger_evidence() {
+    let report = build_report("Test SDF Network ; February 2023", "100", "abc");
+    let json_output = miyo_rpc::output::format_json(&report).expect("JSON serialization");
+    assert!(
+        json_output.contains("\"schema_version\""),
+        "JSON output must contain schema_version: {json_output}"
+    );
+    // The full evidence string survives into the machine-readable report.
+    assert!(json_output.contains("Sent JSON-RPC 2.0 POST to getLatestLedger."));
+}
+
+#[test]
+fn test_json_includes_compare_divergence() {
+    // Primary = testnet, Comparison = mainnet (passport mismatch).
+    let mut report = build_report("Test SDF Network ; February 2023", "100", "abc");
+    let other = build_report(
+        "Public Global Stellar Network ; September 2015",
+        "100",
+        "abc",
+    );
+    report.compare_with(&other);
+
+    let json_output = miyo_rpc::output::format_json(&report).expect("JSON serialization");
+    let parsed: serde_json::Value = serde_json::from_str(&json_output).expect("valid JSON");
+    assert_eq!(
+        parsed.get("schema_version").and_then(|v| v.as_str()),
+        Some("1.0")
+    );
+    // Divergence is surfaced on the getNetwork check's evidence field.
+    let net_evidence = parsed
+        .get("checks")
+        .and_then(|v| v.as_array())
+        .expect("checks is an array")
+        .iter()
+        .find(|c| c.get("name").and_then(|v| v.as_str()) == Some("getNetwork"))
+        .and_then(|c| c.get("evidence").and_then(|v| v.as_str()))
+        .unwrap_or("");
+    assert!(
+        net_evidence.contains("Network divergence"),
+        "getNetwork evidence should record divergence: {net_evidence}"
+    );
+}
+
+#[tokio::test]
+async fn test_batch_all_valid_pass() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+    server
+        .mock("GET", "/")
+        .with_status(200)
+        .create_async()
+        .await;
+    server
+        .mock("POST", "/")
+        .match_header("content-type", "application/json")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(json_body(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "status": "healthy",
+                "latestLedger": 51583040,
+                "oldestLedger": 51565760,
+                "ledgerRetentionWindow": 17281
+            }
+        })))
+        .create_async()
+        .await;
+
+    let mut path = std::env::temp_dir();
+    path.push("miyo_batch_ok.txt");
+    std::fs::write(&path, format!("# comment\n{}\n", url)).unwrap();
+
+    let args = BatchArgs {
+        file: path.to_string_lossy().to_string(),
+        output: OutputFormat::Human,
+        timeout_secs: 5,
+        runs: 1,
+        method: Some("getHealth".to_string()),
+        concurrency: 1,
+        expected_network: None,
+    };
+    let report = miyo_rpc::run_batch(&args).await;
+    assert_eq!(report.summary.total, 1);
+    assert_eq!(report.summary.valid, 1);
+    assert_eq!(report.summary.invalid, 0);
+    assert_eq!(report.summary.healthy, 1);
+    assert_eq!(report.summary.exit_code, 0);
+    assert!(report.endpoints[0].valid);
+    assert!(report.endpoints[0].report.is_some());
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn test_batch_unhealthy_exit_1() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+    server
+        .mock("GET", "/")
+        .with_status(200)
+        .create_async()
+        .await;
+    server
+        .mock("POST", "/")
+        .with_status(500)
+        .with_header("content-type", "text/plain")
+        .with_body("Internal Server Error")
+        .create_async()
+        .await;
+
+    let mut path = std::env::temp_dir();
+    path.push("miyo_batch_bad.txt");
+    std::fs::write(&path, &url).unwrap();
+    let args = BatchArgs {
+        file: path.to_string_lossy().to_string(),
+        output: OutputFormat::Human,
+        timeout_secs: 5,
+        runs: 1,
+        method: Some("getHealth".to_string()),
+        concurrency: 1,
+        expected_network: None,
+    };
+    let report = miyo_rpc::run_batch(&args).await;
+    assert_eq!(report.summary.total, 1);
+    assert_eq!(report.summary.valid, 1);
+    assert_eq!(report.summary.invalid, 0);
+    assert_eq!(report.summary.failed, 1);
+    assert_eq!(report.summary.exit_code, 1);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn test_batch_all_invalid_exit_2() {
+    let mut path = std::env::temp_dir();
+    path.push("miyo_batch_invalid.txt");
+    std::fs::write(&path, "ftp://bad.example\nnot-a-url\n").unwrap();
+    let args = BatchArgs {
+        file: path.to_string_lossy().to_string(),
+        output: OutputFormat::Human,
+        timeout_secs: 5,
+        runs: 1,
+        method: Some("getHealth".to_string()),
+        concurrency: 1,
+        expected_network: None,
+    };
+    let report = miyo_rpc::run_batch(&args).await;
+    assert_eq!(report.summary.total, 2);
+    assert_eq!(report.summary.valid, 0);
+    assert_eq!(report.summary.invalid, 2);
+    assert_eq!(report.summary.exit_code, 2);
+    let _ = std::fs::remove_file(&path);
+}
+
+// ────────────────────────────────
+// Batch credential-handling tests
+// ────────────────────────────────
+
+/// A valid URL with a sensitive query parameter must be used verbatim for
+/// network requests (so the API key reaches the server) while every output
+/// surface must redact it.
+#[tokio::test]
+async fn test_batch_query_credentials_preserved_in_request_sanitized_in_output() {
+    let mut server = mockito::Server::new_async().await;
+    let mock_url = format!("{}?api_key=secret123", server.url());
+
+    // GET mock for httpConnectivity — matches any query string.
+    server
+        .mock("GET", "/")
+        .with_status(200)
+        .create_async()
+        .await;
+
+    // POST mock for getHealth — only matches if the ORIGINAL api_key is
+    // present. If the sanitized URL (api_key=REDACTED) were used for the
+    // request, this mock would NOT match and getHealth would fail.
+    server
+        .mock("POST", "/")
+        .match_query(mockito::Matcher::Regex("api_key=secret123".to_string()))
+        .match_body(mockito::Matcher::Regex(
+            r#""method":"getHealth""#.to_string(),
+        ))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(json_body(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "status": "healthy",
+                "latestLedger": 51583040,
+                "oldestLedger": 51565760,
+                "ledgerRetentionWindow": 17281
+            }
+        })))
+        .create_async()
+        .await;
+
+    let mut path = std::env::temp_dir();
+    path.push("miyo_batch_qcreds.txt");
+    std::fs::write(&path, &mock_url).unwrap();
+
+    let args = BatchArgs {
+        file: path.to_string_lossy().to_string(),
+        output: OutputFormat::Json,
+        timeout_secs: 5,
+        runs: 1,
+        method: Some("getHealth".to_string()),
+        concurrency: 1,
+        expected_network: None,
+    };
+    let report = miyo_rpc::run_batch(&args).await;
+
+    // getHealth must PASS — proving the original URL (with the real api_key)
+    // was used for the HTTP request, not the sanitized one.
+    let entry = &report.endpoints[0];
+    assert!(entry.valid, "endpoint should be valid");
+    let checks = entry
+        .report
+        .as_ref()
+        .and_then(|r| r.get("checks"))
+        .and_then(|c| c.as_array())
+        .expect("checks array");
+    let health = checks
+        .iter()
+        .find(|c| c.get("name").and_then(|v| v.as_str()) == Some("getHealth"))
+        .expect("getHealth check present");
+    assert_eq!(
+        health.get("status").and_then(|v| v.as_str()),
+        Some("pass"),
+        "getHealth should pass — original URL with credentials must be used for requests"
+    );
+
+    // Output surfaces must be sanitized.
+    let json = miyo_rpc::format_batch_json(&report).unwrap();
+    assert!(
+        !json.contains("secret123"),
+        "JSON output must not contain raw secret: {}",
+        json
+    );
+    assert!(json.contains("REDACTED"), "JSON should contain REDACTED");
+    assert!(
+        !entry.endpoint.contains("secret123"),
+        "BatchEntry.endpoint must not contain raw secret"
+    );
+    assert!(entry.endpoint.contains("REDACTED"));
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Invalid URLs containing apparent credentials must not leak secrets in
+/// error messages, JSON reports, or human-readable output.
+#[tokio::test]
+async fn test_batch_invalid_url_credentials_no_leak_json() {
+    // ftp:// with userinfo + sensitive query param → wrong scheme, but URL parses.
+    let input = "ftp://user:secret@host.example/rpc?api_key=leaked";
+
+    let mut path = std::env::temp_dir();
+    path.push("miyo_batch_bad_creds.txt");
+    std::fs::write(&path, input).unwrap();
+
+    let args = BatchArgs {
+        file: path.to_string_lossy().to_string(),
+        output: OutputFormat::Json,
+        timeout_secs: 5,
+        runs: 1,
+        method: None,
+        concurrency: 1,
+        expected_network: None,
+    };
+    let report = miyo_rpc::run_batch(&args).await;
+    let json = miyo_rpc::format_batch_json(&report).unwrap();
+
+    assert!(!report.endpoints[0].valid);
+
+    // Neither the password nor the api_key value may appear anywhere in JSON.
+    assert!(!json.contains("secret"), "JSON leaks password: {}", json);
+    assert!(
+        !json.contains("leaked"),
+        "JSON leaks api_key value: {}",
+        json
+    );
+    assert!(json.contains("REDACTED"), "JSON should contain REDACTED");
+    assert!(
+        !report.endpoints[0].endpoint.contains("secret"),
+        "endpoint field must not leak password"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn test_batch_invalid_url_credentials_no_leak_human() {
+    let input = "ftp://user:secret@host.example/rpc?api_key=leaked";
+
+    let mut path = std::env::temp_dir();
+    path.push("miyo_batch_bad_creds_human.txt");
+    std::fs::write(&path, input).unwrap();
+
+    let args = BatchArgs {
+        file: path.to_string_lossy().to_string(),
+        output: OutputFormat::Human,
+        timeout_secs: 5,
+        runs: 1,
+        method: None,
+        concurrency: 1,
+        expected_network: None,
+    };
+    let report = miyo_rpc::run_batch(&args).await;
+    let human = miyo_rpc::format_batch_human(&report);
+
+    assert!(
+        !human.contains("secret"),
+        "human output leaks password: {}",
+        human
+    );
+    assert!(
+        !human.contains("leaked"),
+        "human output leaks api_key: {}",
+        human
+    );
+    assert!(
+        human.contains("REDACTED"),
+        "human output should contain REDACTED"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Unparseable URL strings that contain apparent userinfo must also be
+/// redacted in batch output (defense-in-depth for malformed input).
+#[tokio::test]
+async fn test_batch_unparseable_url_credentials_redacted() {
+    let input = "https://user:secret@bad host.example/rpc?api_key=leaked\n";
+
+    let mut path = std::env::temp_dir();
+    path.push("miyo_batch_unparseable.txt");
+    std::fs::write(&path, input).unwrap();
+
+    let args = BatchArgs {
+        file: path.to_string_lossy().to_string(),
+        output: OutputFormat::Json,
+        timeout_secs: 5,
+        runs: 1,
+        method: None,
+        concurrency: 1,
+        expected_network: None,
+    };
+    let report = miyo_rpc::run_batch(&args).await;
+    let json = miyo_rpc::format_batch_json(&report).unwrap();
+
+    assert!(!report.endpoints[0].valid);
+    assert!(!json.contains("secret"), "JSON leaks password: {}", json);
+    assert!(!json.contains("leaked"), "JSON leaks api_key: {}", json);
+    assert!(json.contains("REDACTED"));
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Raw key=value strings without a URL scheme must not leak credentials
+/// in batch output (error messages, JSON, human-readable).
+#[tokio::test]
+async fn test_batch_raw_key_value_no_leak() {
+    let input = "secret_key=sk-abc123value\n";
+
+    let mut path = std::env::temp_dir();
+    path.push("miyo_batch_rawkv.txt");
+    std::fs::write(&path, input).unwrap();
+
+    let args = BatchArgs {
+        file: path.to_string_lossy().to_string(),
+        output: OutputFormat::Json,
+        timeout_secs: 5,
+        runs: 1,
+        method: None,
+        concurrency: 1,
+        expected_network: None,
+    };
+    let report = miyo_rpc::run_batch(&args).await;
+    let json = miyo_rpc::format_batch_json(&report).unwrap();
+
+    assert!(!report.endpoints[0].valid);
+    assert!(
+        !json.contains("«redacted:sk-…»"),
+        "JSON leaks raw secret: {}",
+        json
+    );
+    assert!(json.contains("REDACTED"));
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Bare secret-like tokens (no URL scheme, no `?`, no `=`) must not leak.
+#[tokio::test]
+async fn test_batch_bare_secret_token_no_leak() {
+    let input = "pk_live_abcdef0123456789\n";
+
+    let mut path = std::env::temp_dir();
+    path.push("miyo_batch_bare_secret.txt");
+    std::fs::write(&path, input).unwrap();
+
+    let args = BatchArgs {
+        file: path.to_string_lossy().to_string(),
+        output: OutputFormat::Json,
+        timeout_secs: 5,
+        runs: 1,
+        method: None,
+        concurrency: 1,
+        expected_network: None,
+    };
+    let report = miyo_rpc::run_batch(&args).await;
+    let json = miyo_rpc::format_batch_json(&report).unwrap();
+
+    assert!(!report.endpoints[0].valid);
+    assert!(
+        !json.contains("pk_live_abcdef0123456789"),
+        "bare secret leaked in JSON: {}",
+        json
+    );
+    assert!(json.contains("REDACTED"));
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Composite sensitive keys in raw key=value input must not leak.
+#[tokio::test]
+async fn test_batch_composite_key_no_leak() {
+    let input = "my_secret=s3cr3tvalue\n";
+
+    let mut path = std::env::temp_dir();
+    path.push("miyo_batch_composite.txt");
+    std::fs::write(&path, input).unwrap();
+
+    let args = BatchArgs {
+        file: path.to_string_lossy().to_string(),
+        output: OutputFormat::Json,
+        timeout_secs: 5,
+        runs: 1,
+        method: None,
+        concurrency: 1,
+        expected_network: None,
+    };
+    let report = miyo_rpc::run_batch(&args).await;
+    let json = miyo_rpc::format_batch_json(&report).unwrap();
+
+    assert!(!report.endpoints[0].valid);
+    assert!(
+        !json.contains("s3cr3tvalue"),
+        "composite key value leaked: {}",
+        json
+    );
+    assert!(json.contains("REDACTED"));
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// URL-encoded sensitive parameter names in malformed URLs.
+#[tokio::test]
+async fn test_batch_encoded_param_name_no_leak() {
+    // Unparseable URL (space in host) with URL-encoded api_key param name
+    let input = "https://user:secret@bad host.example?api%5fkey=leaked\n";
+
+    let mut path = std::env::temp_dir();
+    path.push("miyo_batch_encoded.txt");
+    std::fs::write(&path, input).unwrap();
+
+    let args = BatchArgs {
+        file: path.to_string_lossy().to_string(),
+        output: OutputFormat::Json,
+        timeout_secs: 5,
+        runs: 1,
+        method: None,
+        concurrency: 1,
+        expected_network: None,
+    };
+    let report = miyo_rpc::run_batch(&args).await;
+    let json = miyo_rpc::format_batch_json(&report).unwrap();
+
+    assert!(!report.endpoints[0].valid);
+    assert!(
+        !json.contains("leaked"),
+        "encoded param value leaked: {}",
+        json
+    );
+    assert!(json.contains("REDACTED"));
+
+    let _ = std::fs::remove_file(&path);
 }

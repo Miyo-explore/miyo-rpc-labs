@@ -1,0 +1,94 @@
+name: Release
+
+# Tag-triggered only. Cannot fire from a pull request or an ordinary branch
+# push, so PR authors cannot publish a release. `permissions` is scoped to the
+# minimum required (`contents: read`); only the release job escalates.
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build artifacts only (skip publishing the GitHub Release)"
+        required: false
+        type: boolean
+        default: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build & package ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: macos-13
+            target: x86_64-apple-darwin
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build (release, frozen)
+        run: cargo build --release --frozen
+
+      - name: Package artifact
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          if [[ "${{ matrix.target }}" == windows-* ]]; then BIN_EXT=".exe"; else BIN_EXT=""; fi
+          mkdir -p dist
+          # `tar` is available on all GitHub-hosted runners (incl. windows-2022's
+          # bsdtar), so .tar.gz is used uniformly across platforms.
+          tar -czf "dist/miyo-rpc-v${TAG}-${{ matrix.target }}.tar.gz" \
+              -C target/release "miyo-rpc${BIN_EXT}"
+          (cd dist && sha256sum "miyo-rpc-v${TAG}-${{ matrix.target }}.tar.gz" \
+            > "miyo-rpc-v${TAG}-${{ matrix.target }}.tar.gz.sha256")
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la artifacts/
+
+      - name: Create GitHub Release
+        if: inputs.dry_run != true
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/miyo-rpc-*.tar.gz
+            artifacts/miyo-rpc-*.tar.gz.sha256
+          generate_release_notes: true

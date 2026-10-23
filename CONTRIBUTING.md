@@ -6,7 +6,7 @@ set up a development environment and the standards for contributions.
 ## Development Setup
 
 ```bash
-git clone https://github.com/naninu123/miyo-rpc-labs.git
+git clone https://github.com/Miyo-explore/miyo-rpc-labs.git
 cd miyo-rpc-labs
 cargo build
 ```

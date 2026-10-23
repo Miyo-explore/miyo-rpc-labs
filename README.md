@@ -87,6 +87,54 @@ cargo build --release
 
 The binary will be at `target/release/miyo-rpc`.
 
+### Prebuilt binaries
+
+GitHub Releases ship checksummed `.tar.gz` artifacts per platform, named
+`miyo-rpc-v<VERSION>-<target>.tar.gz` (plus a `.sha256` sidecar). Pick the
+`<target>` matching your machine:
+
+| Platform | `<target>` |
+|----------|------------|
+| Linux x86_64 | `x86_64-unknown-linux-gnu` |
+| macOS Apple Silicon | `aarch64-apple-darwin` |
+| macOS Intel | `x86_64-apple-darwin` |
+| Windows x86_64 | `x86_64-pc-windows-msvc` |
+
+Verify the checksum before extracting. **Linux x86_64** (the binary inside is
+`miyo-rpc`):
+
+```bash
+VERSION=0.1.0
+TARGET=x86_64-unknown-linux-gnu
+curl -L "https://github.com/Miyo-explore/miyo-rpc-labs/releases/download/v${VERSION}/miyo-rpc-v${VERSION}-${TARGET}.tar.gz" -o "miyo-rpc-v${VERSION}-${TARGET}.tar.gz"
+curl -L "https://github.com/Miyo-explore/miyo-rpc-labs/releases/download/v${VERSION}/miyo-rpc-v${VERSION}-${TARGET}.tar.gz.sha256" -o "miyo-rpc-v${VERSION}-${TARGET}.tar.gz.sha256"
+sha256sum -c "miyo-rpc-v${VERSION}-${TARGET}.tar.gz.sha256" && tar -xzf "miyo-rpc-v${VERSION}-${TARGET}.tar.gz" && ./miyo-rpc --version
+```
+
+**macOS** (Apple Silicon or Intel; the binary inside is `miyo-rpc`):
+
+```bash
+VERSION=0.1.0
+TARGET=aarch64-apple-darwin   # or x86_64-apple-darwin for Intel
+curl -L "https://github.com/Miyo-explore/miyo-rpc-labs/releases/download/v${VERSION}/miyo-rpc-v${VERSION}-${TARGET}.tar.gz" -o "miyo-rpc-v${VERSION}-${TARGET}.tar.gz"
+curl -L "https://github.com/Miyo-explore/miyo-rpc-labs/releases/download/v${VERSION}/miyo-rpc-v${VERSION}-${TARGET}.tar.gz.sha256" -o "miyo-rpc-v${VERSION}-${TARGET}.tar.gz.sha256"
+shasum -a 256 -c "miyo-rpc-v${VERSION}-${TARGET}.tar.gz.sha256" && tar -xzf "miyo-rpc-v${VERSION}-${TARGET}.tar.gz" && ./miyo-rpc --version
+```
+
+**Windows** x86_64 (`miyo-rpc.exe` inside; `tar` is built into Windows 10/11):
+
+```powershell
+$VERSION = "0.1.0"
+$TARGET  = "x86_64-pc-windows-msvc"
+Invoke-WebRequest "https://github.com/Miyo-explore/miyo-rpc-labs/releases/download/v$VERSION/miyo-rpc-v$VERSION-$TARGET.tar.gz" -OutFile miyo-rpc.tar.gz
+Invoke-WebRequest "https://github.com/Miyo-explore/miyo-rpc-labs/releases/download/v$VERSION/miyo-rpc-v$VERSION-$TARGET.tar.gz.sha256" -OutFile miyo-rpc.tar.gz.sha256
+Get-FileHash miyo-rpc.tar.gz -Algorithm SHA256   # compare to .sha256 contents
+tar -xzf miyo-rpc.tar.gz; .\miyo-rpc.exe --version
+```
+
+The single binary has no runtime dependencies; building from source (see
+Prerequisites) works on macOS, Linux, and Windows.
+
 ## Usage
 
 ```text
@@ -95,6 +143,10 @@ miyo-rpc check --url <RPC_URL> --output json         # machine-readable JSON
 miyo-rpc check --url <RPC_URL> --method getHealth    # one JSON-RPC check (httpConnectivity still runs)
 miyo-rpc check --url <RPC_URL> --timeout-secs 10     # override the 15s default
 miyo-rpc check --url <RPC_URL> --runs 5              # repeat 5× with latency stats
+miyo-rpc check --url <RPC_URL> --expected-network testnet  # validate network identity (testnet/mainnet)
+miyo-rpc check --url <RPC_URL> --compare <SECOND_RPC_URL>   # compare network identity + ledger against a second endpoint
+miyo-rpc batch --file endpoints.txt                          # diagnose many endpoints (one URL per line; see Batch Mode)
+miyo-rpc batch --file endpoints.txt --output json            # aggregated JSON (schema_version "1.0")
 miyo-rpc --help
 miyo-rpc --version
 miyo-rpc check --help
@@ -109,6 +161,8 @@ miyo-rpc check --help
 | `--timeout-secs`   | `-t`  | `15`      | Maximum time to wait per HTTP request.                               |
 | `--method <NAME>`  | `-m`  | _(none)_  | Run only the named JSON-RPC method check. The HTTP connectivity check (`httpConnectivity`) always runs regardless of this flag. |
 | `--runs <N>`       | `-n`  | `1`       | Number of diagnostic runs to perform. Clamped to the range `[1, 10]` by the CLI. |
+| `--expected-network <NAME>` | _(none)_ | Validate the endpoint's `getNetwork` passphrase against `testnet` or `mainnet`. A mismatch is reported as FAIL (exit code 1). |
+| `--compare <URL>`      | _(none)_ | Compare the primary endpoint's `getNetwork` passport + `getLatestLedger` sequence/hash against a second endpoint `<URL>`. Divergences are appended as `evidence` (informational; exit code unchanged). |
 | `--help`           |       |           | Show help.                                                                                |
 | `--version`        |       |           | Print version and exit.                                                                   |
 
@@ -126,6 +180,23 @@ miyo-rpc check --help
 | `0`  | All executed checks passed (no `Fail` results).                       |
 | `1`  | One or more checks returned `Fail`.                                 |
 | `2`  | A non-check error occurred (for example, the report could not be serialized to JSON). |
+
+## Network Identity Validation
+
+`--expected-network <NAME>` validates the endpoint's `getNetwork` passphrase
+against a known Stellar network passphrase (`testnet` or `mainnet`). If the
+endpoint reports a different network, the `getNetwork` check is downgraded to
+`Failed` with `IssueCategory::Other`, and `summary.passed`/`failed`/`ran` are
+recomputed so they stay consistent:
+
+```text
+miyo-rpc check --url <RPC_URL> --expected-network testnet
+```
+
+- The HTTP connectivity check is unaffected.
+- If `getNetwork` is skipped (via `--method`) or already failed, no validation
+  is applied — the existing result is preserved.
+- An unknown network name is a usage error (exit code `2`).
 
 ## Repeated Probes and Latency Statistics
 
@@ -235,8 +306,15 @@ serialized as the `IssueCategory` enum string: `Transport`, `HttpError`,
 `MalformedResponse`, `JsonRpcError`, `UnsupportedMethod`, `MissingField`, or
 `Other`.
 
+The first key of every JSON report is `schema_version` (currently `"1.0"`). It is
+bumped (major) only when the JSON shape changes non-backwards-compatibly (a
+field removed, renamed, or its type changed). **Additive** additions — new
+fields or new keys within `details` / `checks` — never bump it. Consumers MUST
+read `schema_version` and MUST ignore fields they do not recognize.
+
 ```json
 {
+  "schema_version": "1.0",
   "tool_version": "0.1.0",
   "endpoint": "https://soroban-testnet.stellar.org",
   "runs": 1,
@@ -339,6 +417,55 @@ To report a reproducible compatibility issue:
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
+
+## Batch Mode
+
+`miyo-rpc batch --file endpoints.txt` diagnoses many Stellar/Soroban RPC
+endpoints in a single invocation and emits one aggregate report suitable for
+automation.
+
+- **File format** — one URL per line; blank lines and `#` comments are skipped;
+  duplicate URLs are de-duplicated (first occurrence wins). At most 1000
+  endpoints are read (constant `MAX_ENDPOINTS`).
+- **Concurrency** — up to `--concurrency` endpoints (default 8, clamped to
+  `[1, 32]`) are diagnosed in parallel via a bounded `tokio::task::JoinSet`
+  with a counting semaphore.
+- **Exit codes**
+  | Code | Meaning |
+  |------|---------|
+  | 0    | all valid endpoints are healthy (every check passed). |
+  | 1    | one or more valid endpoints had a failing check. |
+  | 2    | no valid endpoints were diagnosed (file unreadable, empty, or all lines invalid). |
+- **Reporting invalid input** — invalid lines are kept in the output with
+  `valid: false` and an `error` reason; they are never silently dropped. Exit
+  code 2 distinguishes input failure from diagnostic failures (exit code 1).
+
+**JSON structure** (`--output json`, versioned with `schema_version`):
+
+```json
+{
+  "schema_version": "1.0",
+  "tool_version": "0.1.0",
+  "runs": 1,
+  "endpoints": [
+    {
+      "endpoint": "https://soroban-testnet.stellar.org",
+      "valid": true,
+      "report": { "schema_version": "1.0", "checks": [ ... ], "summary": { ... } }
+    },
+    {
+      "endpoint": "ftp://bad",
+      "valid": false,
+      "error": "'ftp://bad': scheme must be http or https"
+    }
+  ],
+  "summary": { "total": 2, "valid": 1, "invalid": 1, "healthy": 1, "failed": 0, "exit_code": 1 }
+}
+```
+
+> Per-endpoint `report` mirrors the single-check `format_json` shape (it also
+> carries its own `schema_version`). The top-level aggregate report is versioned
+> by the same `schema_version: "1.0"` constant in `src/lib.rs`.
 
 ## Status
 
