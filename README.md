@@ -65,10 +65,10 @@ The binary will be at `target/release/miyo-rpc`.
 ## Usage
 
 ```
-miyo-rpc check --url <RPC_URL>          # human-readable report
-miyo-rpc check --url <RPC_URL> --json   # machine-readable JSON
+miyo-rpc check --url <RPC_URL>                    # human-readable report
+miyo-rpc check --url <RPC_URL> --output json     # machine-readable JSON
 miyo-rpc check --url <RPC_URL> --method getHealth      # single check
-miyo-rpc check --url <RPC_URL> --timeout 10            # 10s timeout
+miyo-rpc check --url <RPC_URL> --timeout-secs 10       # 10s timeout
 miyo-rpc --help
 miyo-rpc --version
 ```
@@ -145,7 +145,7 @@ gated behind a feature flag so they never run in ordinary CI.
 
 To report a reproducible compatibility issue:
 
-1. Run `miyo-rpc check --url <YOUR_RPC_URL> --json > report.json`.
+1. Run `miyo-rpc check --url <YOUR_RPC_URL> --output json > report.json`.
 2. Share the sanitized `report.json` and the **exact URL** (without
    secrets) in a GitHub issue.
 3. Include the `tool_version` and `run_started` fields from the report.

@@ -223,12 +223,12 @@ pub async fn http_connectivity_check(
         .build()
     {
         Ok(c) => c,
-        Err(e) => {
+        Err(_e) => {
             return fail_result(
                 method,
                 &endpoint,
                 timestamp,
-                &MiyoError::Network(format!("failed to build HTTP client: {e}")),
+                &MiyoError::Network("failed to build HTTP client".to_string()),
                 format!("Construct an HTTP client for {endpoint}."),
             );
         }
@@ -279,14 +279,14 @@ pub async fn http_connectivity_check(
             method,
             &endpoint,
             timestamp,
-            &MiyoError::Network(format!("connection failed: {e}")),
+            &MiyoError::Network(format!("connection failed for {endpoint}")),
             format!("Issue HTTP GET to {endpoint}."),
         ),
-        Err(e) => fail_result(
+        Err(_e) => fail_result(
             method,
             &endpoint,
             timestamp,
-            &MiyoError::Network(e.to_string()),
+            &MiyoError::Network(format!("network failure for {endpoint}")),
             format!("Issue HTTP GET to {endpoint}."),
         ),
     }

@@ -19,7 +19,17 @@ pub struct RpcClientConfig {
     pub follow_redirects: bool,
     /// User-Agent string sent with requests.
     pub user_agent: String,
+    /// Maximum response body size in bytes. Responses exceeding this are
+    /// rejected as errors rather than buffered into memory.
+    pub max_response_bytes: usize,
 }
+
+/// Default maximum response body size: 10 MiB.
+///
+/// This is generous enough for any single Stellar JSON-RPC response
+/// (the largest is `getLatestLedger` with `metadataXdr`), while preventing
+/// unbounded memory consumption from misconfigured or malicious endpoints.
+pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
 
 impl Default for RpcClientConfig {
     fn default() -> Self {
@@ -27,6 +37,7 @@ impl Default for RpcClientConfig {
             timeout: Duration::from_secs(15),
             follow_redirects: true,
             user_agent: format!("miyo-rpc/{}", crate::VERSION),
+            max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
         }
     }
 }
@@ -120,18 +131,53 @@ impl RpcClient {
 
         let duration = started.elapsed();
 
-        let response = match response {
+        let mut response = match response {
             Ok(r) => r,
             Err(e) if e.is_timeout() => return Err(MiyoError::Timeout(self.config.timeout)),
-            Err(e) => return Err(MiyoError::Network(e.to_string())),
+            Err(e) => {
+                // Redact the endpoint URL before embedding it in an error
+                // message — reqwest's Display output may include the raw URL
+                // (which can carry credentials in userinfo).
+                let endpoint = crate::output::sanitize_url(&self.url);
+                let detail = if e.is_connect() {
+                    "connection failed".to_string()
+                } else {
+                    "request failed".to_string()
+                };
+                return Err(MiyoError::Network(format!("{detail} for {endpoint}")));
+            }
         };
 
         let status = response.status().as_u16();
         let headers = response.headers().clone();
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|e| MiyoError::Network(format!("failed to read response body: {e}")))?;
+
+        // Read the body incrementally, enforcing a size cap so a misconfigured
+        // or malicious endpoint cannot exhaust memory.
+        let max = self.config.max_response_bytes;
+        let mut bytes: Vec<u8> = Vec::new();
+        loop {
+            match response.chunk().await {
+                Ok(Some(chunk)) => {
+                    bytes.extend_from_slice(&chunk);
+                    if bytes.len() > max {
+                        return Err(MiyoError::HttpError {
+                            status,
+                            body: format!(
+                                "response body exceeds maximum size of {} bytes (got {})",
+                                max,
+                                bytes.len()
+                            ),
+                        });
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    return Err(MiyoError::Network(format!(
+                        "failed to read response body: {e}"
+                    )));
+                }
+            }
+        }
 
         let headers_json: serde_json::Map<String, Value> = headers
             .iter()
