@@ -15,7 +15,7 @@ use serde_json::Value;
 use std::time::Duration;
 
 /// The outcome of a diagnostic check.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CheckStatus {
     /// The check completed and the endpoint behaved as expected.
@@ -25,6 +25,20 @@ pub enum CheckStatus {
     /// The check could not be performed (e.g., a prior check failed and this
     /// check depends on it, or the method is not applicable).
     Skip,
+}
+
+/// Determine the worst (highest-precedence) status from a set of results.
+///
+/// Precedence: Fail > Skip > Pass. A `Fail` in any run must never be hidden
+/// by `Skip` or `Pass` in another run.
+pub fn worst_status(statuses: &[CheckStatus]) -> CheckStatus {
+    if statuses.contains(&CheckStatus::Fail) {
+        CheckStatus::Fail
+    } else if statuses.contains(&CheckStatus::Skip) {
+        CheckStatus::Skip
+    } else {
+        CheckStatus::Pass
+    }
 }
 
 /// Coarse category of an issue when a check fails.
@@ -380,11 +394,13 @@ impl DiagnosticReport {
                 // Also add HTTP connectivity as a check.
                 checks.insert(0, http_connectivity_check(url, timeout, &user_agent).await);
 
-                let summary = summarize(&checks, runs);
+                // Client initialization failed — no retry loop was executed.
+                // Report completed runs as 1 (the single connectivity attempt).
+                let summary = summarize(&checks, 1);
                 return Self {
                     tool_version: crate::VERSION.to_string(),
                     endpoint,
-                    runs,
+                    runs: 1,
                     checks,
                     summary,
                 };
@@ -482,8 +498,9 @@ fn aggregate(per_run: &[Vec<CheckResult>]) -> Vec<CheckResult> {
             .collect();
         let first = *hits.first().expect("each run has the same check names");
 
-        // Worst status wins (Fail > Skip > Pass thanks to Ord).
-        let status = hits.iter().map(|c| c.status).max();
+        // Worst status wins (Fail > Skip > Pass).
+        let statuses: Vec<CheckStatus> = hits.iter().map(|c| c.status).collect();
+        let status = worst_status(&statuses);
 
         let durations: Vec<u64> = hits.iter().filter_map(|c| c.duration_ms).collect();
         let avg_ms = if durations.is_empty() {
@@ -493,7 +510,7 @@ fn aggregate(per_run: &[Vec<CheckResult>]) -> Vec<CheckResult> {
         };
 
         let mut result = CheckResult::clone(first);
-        result.status = status.expect("hits is always non-empty");
+        result.status = status;
         result.duration_ms = avg_ms;
 
         if per_run.len() > 1 && !durations.is_empty() {
@@ -518,4 +535,146 @@ fn aggregate(per_run: &[Vec<CheckResult>]) -> Vec<CheckResult> {
     }
 
     aggregated
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_result(name: &str, status: CheckStatus, duration_ms: Option<u64>) -> CheckResult {
+        CheckResult {
+            name: name.to_string(),
+            status,
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+            duration_ms,
+            http_status: None,
+            endpoint: "https://REDACTED".to_string(),
+            details: None,
+            error: None,
+            error_message: None,
+            evidence: None,
+        }
+    }
+
+    #[test]
+    fn test_worst_status_precedence() {
+        // Fail beats everything
+        assert_eq!(
+            worst_status(&[CheckStatus::Pass, CheckStatus::Fail]),
+            CheckStatus::Fail
+        );
+        assert_eq!(
+            worst_status(&[CheckStatus::Skip, CheckStatus::Fail]),
+            CheckStatus::Fail
+        );
+        // Skip beats Pass (but not Fail)
+        assert_eq!(
+            worst_status(&[CheckStatus::Pass, CheckStatus::Skip]),
+            CheckStatus::Skip
+        );
+        // Same statuses
+        assert_eq!(
+            worst_status(&[CheckStatus::Pass, CheckStatus::Pass]),
+            CheckStatus::Pass
+        );
+        assert_eq!(
+            worst_status(&[CheckStatus::Skip, CheckStatus::Skip]),
+            CheckStatus::Skip
+        );
+        assert_eq!(
+            worst_status(&[CheckStatus::Fail, CheckStatus::Fail]),
+            CheckStatus::Fail
+        );
+    }
+
+    #[test]
+    fn test_aggregate_fail_beats_pass() {
+        let per_run = vec![
+            vec![make_result("x", CheckStatus::Pass, Some(100))],
+            vec![make_result("x", CheckStatus::Fail, None)],
+        ];
+        let result = aggregate(&per_run);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].status, CheckStatus::Fail);
+    }
+
+    #[test]
+    fn test_aggregate_skip_does_not_hide_fail() {
+        let per_run = vec![
+            vec![
+                make_result("pass", CheckStatus::Pass, Some(100)),
+                make_result("skip", CheckStatus::Skip, None),
+            ],
+            vec![
+                make_result("pass", CheckStatus::Fail, None),
+                make_result("skip", CheckStatus::Skip, None),
+            ],
+        ];
+        let result = aggregate(&per_run);
+        let pass = result.iter().find(|c| c.name == "pass").unwrap();
+        assert_eq!(pass.status, CheckStatus::Fail);
+        let skip = result.iter().find(|c| c.name == "skip").unwrap();
+        assert_eq!(skip.status, CheckStatus::Skip);
+    }
+
+    #[test]
+    fn test_aggregate_pass_plus_skip_to_skip() {
+        let per_run = vec![
+            vec![make_result("x", CheckStatus::Pass, Some(100))],
+            vec![make_result("x", CheckStatus::Skip, None)],
+        ];
+        let result = aggregate(&per_run);
+        assert_eq!(result[0].status, CheckStatus::Skip);
+        // avg of single duration = 100
+        assert_eq!(result[0].duration_ms, Some(100));
+        let details = result[0].details.as_ref().unwrap();
+        assert_eq!(details.get("latency_min_ms"), Some(&Value::from(100u64)));
+        assert_eq!(details.get("latency_max_ms"), Some(&Value::from(100u64)));
+        assert_eq!(details.get("run_count"), Some(&Value::from(2u64)));
+    }
+
+    #[test]
+    fn test_aggregate_transient_failure() {
+        let per_run = vec![
+            vec![make_result("getHealth", CheckStatus::Pass, Some(120))],
+            vec![make_result("getHealth", CheckStatus::Pass, Some(90))],
+            vec![make_result("getHealth", CheckStatus::Fail, None)],
+        ];
+        let result = aggregate(&per_run);
+        assert_eq!(result[0].status, CheckStatus::Fail);
+        // avg = (120 + 90) / 2 = 105 (only 2 runs had durations)
+        assert_eq!(result[0].duration_ms, Some(105));
+        let details = result[0].details.as_ref().unwrap();
+        assert_eq!(details.get("latency_min_ms"), Some(&Value::from(90u64)));
+        assert_eq!(details.get("latency_max_ms"), Some(&Value::from(120u64)));
+        assert_eq!(details.get("run_count"), Some(&Value::from(3u64)));
+    }
+
+    #[test]
+    fn test_single_run_aggregation_unchanged() {
+        let per_run = vec![vec![make_result("x", CheckStatus::Pass, Some(100))]];
+        let result = aggregate(&per_run);
+        assert_eq!(result[0].status, CheckStatus::Pass);
+        assert_eq!(result[0].duration_ms, Some(100));
+        // No latency stats for single run
+        assert!(
+            result[0].details.is_none()
+                || !result[0]
+                    .details
+                    .as_ref()
+                    .unwrap()
+                    .contains_key("latency_min_ms")
+        );
+    }
+
+    #[test]
+    fn test_summarize_total_runs_field() {
+        let checks = vec![make_result("x", CheckStatus::Pass, Some(100))];
+        let summary = summarize(&checks, 5);
+        assert_eq!(summary.total_runs, 5);
+        assert_eq!(summary.ran, 1);
+        assert_eq!(summary.passed, 1);
+        assert_eq!(summary.failed, 0);
+        assert_eq!(summary.skipped, 0);
+    }
 }

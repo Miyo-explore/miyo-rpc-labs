@@ -875,3 +875,39 @@ async fn test_single_run_skips_latency_stats() {
         "single run should not include latency stats"
     );
 }
+
+/// When `--runs > 1` targets an unreachable host, the loop still executes
+/// `runs` times and reports the completed count honestly.
+#[tokio::test]
+async fn test_multiple_runs_on_connection_failure() {
+    let report =
+        DiagnosticReport::run_all("http://127.0.0.1:1", Duration::from_millis(100), None, 5).await;
+
+    assert_eq!(report.runs, 5);
+    assert_eq!(report.summary.total_runs, 5);
+    // No check should be Pass against an unreachable endpoint.
+    for c in &report.checks {
+        assert_ne!(c.status, miyo_rpc::CheckStatus::Pass);
+    }
+    // Endpoint must be sanitized.
+    assert!(!report.endpoint.contains("secret"));
+}
+
+/// When reqwest::Client::build() fails (e.g. unsupported `ftp://` scheme),
+/// `RpcClient::new` returns an error and `run_all` takes the early-return path.
+/// No retry loop executes, so `runs` must report 1 (the single connectivity
+/// attempt), not the user-requested count.
+#[tokio::test]
+async fn test_client_init_failure_reports_one_run() {
+    let report =
+        DiagnosticReport::run_all("ftp://example.com/rpc", Duration::from_millis(100), None, 3)
+            .await;
+
+    assert_eq!(report.runs, 1);
+    assert_eq!(report.summary.total_runs, 1);
+    // All checks fail when the client cannot be initialised.
+    for c in &report.checks {
+        assert_eq!(c.status, miyo_rpc::CheckStatus::Fail);
+    }
+    assert!(!report.endpoint.contains("secret"));
+}
