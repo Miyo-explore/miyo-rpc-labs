@@ -136,6 +136,9 @@ pub fn format_human(report: &DiagnosticReport) -> String {
         out.push('\n');
     }
 
+    if report.runs > 1 {
+        out.push_str(&format!("Runs: {} total\n", report.runs));
+    }
     out.push_str(&format!(
         "Summary: {} passed, {} failed, {} skipped ({} ran)\n",
         report.summary.passed, report.summary.failed, report.summary.skipped, report.summary.ran
@@ -154,6 +157,7 @@ pub fn format_json(report: &DiagnosticReport) -> Result<String, serde_json::Erro
     struct JsonReport {
         tool_version: String,
         endpoint: String,
+        runs: usize,
         checks: Vec<CheckResultJson>,
         summary: ReportSummary,
     }
@@ -199,6 +203,7 @@ pub fn format_json(report: &DiagnosticReport) -> Result<String, serde_json::Erro
     let j = JsonReport {
         tool_version: report.tool_version.clone(),
         endpoint: report.endpoint.clone(),
+        runs: report.runs,
         checks,
         summary: report.summary.clone(),
     };

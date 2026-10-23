@@ -57,4 +57,10 @@ pub struct CheckArgs {
     /// RPC method to test in isolation (e.g. getHealth). Runs only that check.
     #[arg(short = 'm', long, value_name = "METHOD")]
     pub method: Option<String>,
+
+    /// Number of diagnostic runs to perform (default: 1, max: 10).
+    /// Repeats all checks and aggregates results across runs to measure
+    /// reliability and latency distribution.
+    #[arg(short = 'n', long = "runs", default_value_t = 1)]
+    pub runs: u32,
 }

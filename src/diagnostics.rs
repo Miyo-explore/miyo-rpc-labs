@@ -15,7 +15,7 @@ use serde_json::Value;
 use std::time::Duration;
 
 /// The outcome of a diagnostic check.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CheckStatus {
     /// The check completed and the endpoint behaved as expected.
@@ -110,6 +110,8 @@ pub struct DiagnosticReport {
     pub tool_version: String,
     /// Sanitized endpoint URL.
     pub endpoint: String,
+    /// Number of diagnostic runs performed (1 for a single pass).
+    pub runs: usize,
     /// All individual check results.
     pub checks: Vec<CheckResult>,
     /// Overall summary.
@@ -126,6 +128,8 @@ pub struct ReportSummary {
     pub failed: u32,
     /// Number of skipped checks.
     pub skipped: u32,
+    /// Total number of diagnostic runs.
+    pub total_runs: u32,
 }
 
 /// A concrete check implementation for a Stellar RPC method that takes no params.
@@ -345,7 +349,12 @@ pub fn all_checks() -> Vec<SimpleMethodCheck> {
 
 impl DiagnosticReport {
     /// Run all diagnostic checks against the endpoint and return a full report.
-    pub async fn run_all(url: &str, timeout: Duration, method_filter: Option<&str>) -> Self {
+    pub async fn run_all(
+        url: &str,
+        timeout: Duration,
+        method_filter: Option<&str>,
+        runs: usize,
+    ) -> Self {
         let endpoint = sanitize_url(url);
         let config = RpcClientConfig::new(timeout);
         let client = match RpcClient::new(url, config) {
@@ -371,10 +380,11 @@ impl DiagnosticReport {
                 // Also add HTTP connectivity as a check.
                 checks.insert(0, http_connectivity_check(url, timeout, &user_agent).await);
 
-                let summary = summarize(&checks);
+                let summary = summarize(&checks, runs);
                 return Self {
                     tool_version: crate::VERSION.to_string(),
                     endpoint,
+                    runs,
                     checks,
                     summary,
                 };
@@ -383,50 +393,58 @@ impl DiagnosticReport {
 
         let user_agent = format!("miyo-rpc/{}", crate::VERSION);
 
-        // Always run HTTP connectivity first.
-        let mut results: Vec<CheckResult> =
-            vec![http_connectivity_check(url, timeout, &user_agent).await];
+        // Run diagnostics `runs` times, collecting raw results for aggregation.
+        let mut per_run: Vec<Vec<CheckResult>> = Vec::with_capacity(runs);
+        for _ in 0..runs {
+            let mut run_results: Vec<CheckResult> =
+                vec![http_connectivity_check(url, timeout, &user_agent).await];
 
-        let checks = all_checks();
-        for check in &checks {
-            if let Some(m) = &method_filter {
-                if *m != check.method_name {
-                    results.push(CheckResult {
-                        name: check.method_name.to_string(),
-                        status: CheckStatus::Skip,
-                        timestamp: chrono::Utc::now().to_rfc3339(),
-                        duration_ms: None,
-                        http_status: None,
-                        endpoint: endpoint.clone(),
-                        details: None,
-                        error: None,
-                        error_message: None,
-                        evidence: Some(
-                            "Skipped: --method filter does not match this check.".to_string(),
-                        ),
-                    });
-                    continue;
+            let checks = all_checks();
+            for check in &checks {
+                if let Some(m) = method_filter {
+                    if m != check.method_name {
+                        run_results.push(CheckResult {
+                            name: check.method_name.to_string(),
+                            status: CheckStatus::Skip,
+                            timestamp: chrono::Utc::now().to_rfc3339(),
+                            duration_ms: None,
+                            http_status: None,
+                            endpoint: endpoint.clone(),
+                            details: None,
+                            error: None,
+                            error_message: None,
+                            evidence: Some(
+                                "Skipped: --method filter does not match this check.".to_string(),
+                            ),
+                        });
+                        continue;
+                    }
                 }
+                run_results.push(check.run(&client).await);
             }
-            results.push(check.run(&client).await);
+            per_run.push(run_results);
         }
 
-        let summary = summarize(&results);
+        // Aggregate across runs (worst status wins, durations averaged).
+        let checks = aggregate(&per_run);
+        let summary = summarize(&checks, runs);
         Self {
             tool_version: crate::VERSION.to_string(),
             endpoint,
-            checks: results,
+            runs,
+            checks,
             summary,
         }
     }
 }
 
-fn summarize(checks: &[CheckResult]) -> ReportSummary {
+fn summarize(checks: &[CheckResult], runs: usize) -> ReportSummary {
     let mut s = ReportSummary {
         ran: 0,
         passed: 0,
         failed: 0,
         skipped: 0,
+        total_runs: runs as u32,
     };
     for c in checks {
         match c.status {
@@ -442,4 +460,62 @@ fn summarize(checks: &[CheckResult]) -> ReportSummary {
         }
     }
     s
+}
+
+/// Aggregate results from multiple runs into a single summary per check.
+///
+/// The status of each check is the "worst" across all runs (Fail > Skip > Pass),
+/// and `duration_ms` becomes the average. When more than one run was performed,
+/// latency statistics (min/max/avg) and `run_count` are added to `details`.
+fn aggregate(per_run: &[Vec<CheckResult>]) -> Vec<CheckResult> {
+    if per_run.is_empty() || per_run[0].is_empty() {
+        return Vec::new();
+    }
+
+    let check_names: Vec<&str> = per_run[0].iter().map(|c| c.name.as_str()).collect();
+    let mut aggregated = Vec::with_capacity(check_names.len());
+
+    for name in &check_names {
+        let hits: Vec<&CheckResult> = per_run
+            .iter()
+            .filter_map(|run| run.iter().find(|c| c.name == *name))
+            .collect();
+        let first = *hits.first().expect("each run has the same check names");
+
+        // Worst status wins (Fail > Skip > Pass thanks to Ord).
+        let status = hits.iter().map(|c| c.status).max();
+
+        let durations: Vec<u64> = hits.iter().filter_map(|c| c.duration_ms).collect();
+        let avg_ms = if durations.is_empty() {
+            None
+        } else {
+            Some(durations.iter().sum::<u64>() / durations.len() as u64)
+        };
+
+        let mut result = CheckResult::clone(first);
+        result.status = status.expect("hits is always non-empty");
+        result.duration_ms = avg_ms;
+
+        if per_run.len() > 1 && !durations.is_empty() {
+            let mut details = result.details.clone().unwrap_or_default();
+            details.insert("run_count".to_string(), Value::from(per_run.len()));
+            details.insert(
+                "latency_min_ms".to_string(),
+                Value::from(durations.iter().copied().min().unwrap()),
+            );
+            details.insert(
+                "latency_max_ms".to_string(),
+                Value::from(durations.iter().copied().max().unwrap()),
+            );
+            details.insert(
+                "latency_avg_ms".to_string(),
+                Value::from(avg_ms.expect("avg_ms computed when durations are non-empty") as f64),
+            );
+            result.details = Some(details);
+        }
+
+        aggregated.push(result);
+    }
+
+    aggregated
 }

@@ -69,6 +69,7 @@ miyo-rpc check --url <RPC_URL>                    # human-readable report
 miyo-rpc check --url <RPC_URL> --output json     # machine-readable JSON
 miyo-rpc check --url <RPC_URL> --method getHealth      # single check
 miyo-rpc check --url <RPC_URL> --timeout-secs 10       # 10s timeout
+miyo-rpc check --url <RPC_URL> --runs 5                # repeat 5x with latency stats
 miyo-rpc --help
 miyo-rpc --version
 ```
