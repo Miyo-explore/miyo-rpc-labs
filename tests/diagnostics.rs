@@ -405,7 +405,7 @@ async fn test_report_all_success() {
         })))
         .create();
 
-    let report = DiagnosticReport::run_all(&url, Duration::from_secs(5), None).await;
+    let report = DiagnosticReport::run_all(&url, Duration::from_secs(5), None, 1).await;
 
     // Should have httpConnectivity + 4 method checks = 5 total
     assert_eq!(report.checks.len(), 5);
@@ -458,7 +458,7 @@ async fn test_report_all_json_rpc_errors() {
         })))
         .create();
 
-    let report = DiagnosticReport::run_all(&url, Duration::from_secs(5), None).await;
+    let report = DiagnosticReport::run_all(&url, Duration::from_secs(5), None, 1).await;
 
     // 4 RPC method checks should all be Fail
     let rpc_checks: Vec<_> = report
@@ -499,7 +499,8 @@ async fn test_report_method_filter() {
         })))
         .create();
 
-    let report = DiagnosticReport::run_all(&url, Duration::from_secs(5), Some("getHealth")).await;
+    let report =
+        DiagnosticReport::run_all(&url, Duration::from_secs(5), Some("getHealth"), 1).await;
 
     // getHealth should pass, others should be skipped
     let health_check = report.checks.iter().find(|c| c.name == "getHealth");
@@ -536,7 +537,8 @@ async fn test_json_output_format() {
         })))
         .create();
 
-    let report = DiagnosticReport::run_all(&url, Duration::from_secs(5), Some("getHealth")).await;
+    let report =
+        DiagnosticReport::run_all(&url, Duration::from_secs(5), Some("getHealth"), 1).await;
     let json_output = miyo_rpc::output::format_json(&report).expect("JSON serialization");
     let parsed: serde_json::Value = serde_json::from_str(&json_output).expect("valid JSON");
 
@@ -577,7 +579,8 @@ async fn test_human_output_format() {
         })))
         .create();
 
-    let report = DiagnosticReport::run_all(&url, Duration::from_secs(5), Some("getHealth")).await;
+    let report =
+        DiagnosticReport::run_all(&url, Duration::from_secs(5), Some("getHealth"), 1).await;
     let human_output = miyo_rpc::output::format_human(&report);
 
     assert!(
@@ -600,7 +603,7 @@ async fn test_human_output_format() {
 #[tokio::test]
 async fn test_report_connection_failure() {
     let report =
-        DiagnosticReport::run_all("http://127.0.0.1:1", Duration::from_millis(200), None).await;
+        DiagnosticReport::run_all("http://127.0.0.1:1", Duration::from_millis(200), None, 1).await;
 
     let http_check = report.checks.iter().find(|c| c.name == "httpConnectivity");
     assert!(http_check.is_some());
@@ -636,7 +639,7 @@ async fn test_invalid_url_scheme() {
 #[tokio::test]
 async fn test_output_never_leaks_secrets() {
     let url_with_secret = "https://example.com/rpc?key=supersecretvalue&token=topsecret";
-    let report = DiagnosticReport::run_all(url_with_secret, Duration::from_secs(5), None).await;
+    let report = DiagnosticReport::run_all(url_with_secret, Duration::from_secs(5), None, 1).await;
 
     let human = miyo_rpc::output::format_human(&report);
     assert!(
@@ -791,4 +794,120 @@ async fn test_oversized_http_error_body_rejected() {
         !err_str.contains("ZZZ"),
         "error must not leak response body: {err_str}"
     );
+}
+
+// ────────────────────────────────
+// Multi-run latency aggregation tests
+// ────────────────────────────────
+
+#[tokio::test]
+async fn test_multi_run_aggregates_latency() {
+    let mut server = mockito::Server::new_async().await;
+    server
+        .mock("POST", "/")
+        .match_body(mockito::Matcher::Regex(
+            r#""method":"getHealth""#.to_string(),
+        ))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            r#"{"jsonrpc":"2.0","id":1,"result":{"status":"healthy","latest_ledger":"00000001"}}"#,
+        )
+        .create();
+
+    let report =
+        DiagnosticReport::run_all(&server.url(), Duration::from_secs(5), Some("getHealth"), 3)
+            .await;
+
+    assert_eq!(report.runs, 3);
+    assert_eq!(report.summary.total_runs, 3);
+
+    let health = report
+        .checks
+        .iter()
+        .find(|c| c.name == "getHealth")
+        .expect("getHealth check present");
+    assert_eq!(health.status, miyo_rpc::CheckStatus::Pass);
+    assert!(health.duration_ms.is_some(), "duration should be averaged");
+
+    let details = health
+        .details
+        .as_ref()
+        .expect("latency stats should be in details");
+    assert!(details.contains_key("latency_min_ms"));
+    assert!(details.contains_key("latency_max_ms"));
+    assert!(details.contains_key("latency_avg_ms"));
+    assert_eq!(details.get("run_count"), Some(&serde_json::json!(3)));
+}
+
+#[tokio::test]
+async fn test_single_run_skips_latency_stats() {
+    let mut server = mockito::Server::new_async().await;
+    server
+        .mock("POST", "/")
+        .match_body(mockito::Matcher::Regex(
+            r#""method":"getHealth""#.to_string(),
+        ))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            r#"{"jsonrpc":"2.0","id":1,"result":{"status":"healthy","latest_ledger":"00000001"}}"#,
+        )
+        .create();
+
+    let report =
+        DiagnosticReport::run_all(&server.url(), Duration::from_secs(5), Some("getHealth"), 1)
+            .await;
+
+    assert_eq!(report.runs, 1);
+    let health = report
+        .checks
+        .iter()
+        .find(|c| c.name == "getHealth")
+        .expect("getHealth check present");
+    assert!(
+        health.details.is_none()
+            || !health
+                .details
+                .as_ref()
+                .unwrap()
+                .contains_key("latency_min_ms"),
+        "single run should not include latency stats"
+    );
+}
+
+/// When `--runs > 1` targets an unreachable host, the loop still executes
+/// `runs` times and reports the completed count honestly.
+#[tokio::test]
+async fn test_multiple_runs_on_connection_failure() {
+    let report =
+        DiagnosticReport::run_all("http://127.0.0.1:1", Duration::from_millis(100), None, 5).await;
+
+    assert_eq!(report.runs, 5);
+    assert_eq!(report.summary.total_runs, 5);
+    // No check should be Pass against an unreachable endpoint.
+    for c in &report.checks {
+        assert_ne!(c.status, miyo_rpc::CheckStatus::Pass);
+    }
+    // Endpoint must be sanitized.
+    assert!(!report.endpoint.contains("secret"));
+}
+
+/// When reqwest::Client::build() fails (e.g. unsupported `ftp://` scheme),
+/// `RpcClient::new` returns an error and `run_all` takes the early-return path.
+/// No retry loop executes, so `runs` must report 1 (the single connectivity
+/// attempt), not the user-requested count.
+#[tokio::test]
+async fn test_client_init_failure_reports_one_run() {
+    let report =
+        DiagnosticReport::run_all("ftp://example.com/rpc", Duration::from_millis(100), None, 3)
+            .await;
+
+    assert_eq!(report.runs, 1);
+    assert_eq!(report.summary.total_runs, 1);
+    // All checks fail when the client cannot be initialised.
+    for c in &report.checks {
+        assert_eq!(c.status, miyo_rpc::CheckStatus::Fail);
+    }
+    assert!(!report.endpoint.contains("secret"));
 }

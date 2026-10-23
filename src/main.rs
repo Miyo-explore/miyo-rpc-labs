@@ -19,7 +19,13 @@ fn run_check(args: CheckArgs) -> ExitCode {
 
     let report = rt.block_on(async {
         let timeout = Duration::from_secs(args.timeout_secs);
-        DiagnosticReport::run_all(&args.url, timeout, args.method.as_deref()).await
+        DiagnosticReport::run_all(
+            &args.url,
+            timeout,
+            args.method.as_deref(),
+            std::cmp::min(args.runs.max(1), 10) as usize,
+        )
+        .await
     });
 
     match args.output {
