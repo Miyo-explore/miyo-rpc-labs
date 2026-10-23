@@ -92,7 +92,7 @@ The binary will be at `target/release/miyo-rpc`.
 ```text
 miyo-rpc check --url <RPC_URL>                       # human-readable report (default)
 miyo-rpc check --url <RPC_URL> --output json         # machine-readable JSON
-miyo-rpc check --url <RPC_URL> --method getHealth    # run a single check
+miyo-rpc check --url <RPC_URL> --method getHealth    # one JSON-RPC check (httpConnectivity still runs)
 miyo-rpc check --url <RPC_URL> --timeout-secs 10     # override the 15s default
 miyo-rpc check --url <RPC_URL> --runs 5              # repeat 5× with latency stats
 miyo-rpc --help
@@ -107,7 +107,7 @@ miyo-rpc check --help
 | `--url <URL>`      | `-u`  | _required_ | The Stellar JSON-RPC endpoint URL to diagnose.                       |
 | `--output <FMT>`   | `-o`  | `human`   | `human` (colored terminal) or `json`.                                |
 | `--timeout-secs`   | `-t`  | `15`      | Maximum time to wait per HTTP request.                               |
-| `--method <NAME>`  | `-m`  | _(none)_  | Run only the named check (`getHealth`, `getNetwork`, `getLatestLedger`, `getVersionInfo`, or `httpConnectivity`). |
+| `--method <NAME>`  | `-m`  | _(none)_  | Run only the named JSON-RPC method check. The HTTP connectivity check (`httpConnectivity`) always runs regardless of this flag. |
 | `--runs <N>`       | `-n`  | `1`       | Number of diagnostic runs to perform. Clamped to the range `[1, 10]` by the CLI. |
 | `--help`           |       |           | Show help.                                                                                |
 | `--version`        |       |           | Print version and exit.                                                                   |
@@ -204,7 +204,7 @@ Endpoint: https://soroban-testnet.stellar.org
     endpoint_reachable: true
     http_status: 405
     latency_min_ms: 258
-    latency_avg_ms: 270.0
+    latency_avg_ms: 281.0
     latency_max_ms: 282
     run_count: 3
     evidence: Issued HTTP GET to https://soroban-testnet.stellar.org with timeout 15s and User-Agent 'miyo-rpc/0.1.0'.
@@ -213,8 +213,8 @@ Endpoint: https://soroban-testnet.stellar.org
     description: "Node health status and ledger window bounds."
     http_status: 200
     latency_min_ms: 261
-    latency_avg_ms: 262.0
-    latency_max_ms: 266
+    latency_avg_ms: 270.0
+    latency_max_ms: 286
     run_count: 3
     status: "healthy"
     evidence: Sent JSON-RPC 2.0 POST to https://soroban-testnet.stellar.org with method 'getHealth' and no params.
