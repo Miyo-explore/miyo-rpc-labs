@@ -703,3 +703,92 @@ async fn test_network_error_redacts_url() {
         "network error should reference sanitized endpoint: {err_str}"
     );
 }
+
+// ────────────────────────────────
+// Bounded response size tests
+// ────────────────────────────────
+
+#[tokio::test]
+async fn test_oversized_response_rejected() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+
+    // Build a JSON body larger than the configured limit.
+    let payload = "A".repeat(200);
+    let body = format!(
+        r#"{{"jsonrpc":"2.0","id":1,"result":{{"status":"healthy","big":"{}"}}}}"#,
+        payload
+    );
+
+    server
+        .mock("POST", "/")
+        .match_body(mockito::Matcher::Regex(
+            r#""method":"getHealth""#.to_string(),
+        ))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(body)
+        .create();
+
+    let mut config = miyo_rpc::RpcClientConfig::new(Duration::from_secs(5));
+    config.max_response_bytes = 50; // 50-byte limit to force rejection
+    let client = miyo_rpc::RpcClient::new(&url, config).expect("should create client");
+
+    let result = client.call::<Value>("getHealth", None).await;
+    assert!(
+        result.is_err(),
+        "should reject response exceeding size limit"
+    );
+    let err_str = result.err().unwrap().to_string();
+    assert!(
+        err_str.contains("exceeds maximum size"),
+        "error should mention size limit: {err_str}"
+    );
+    // The oversized body content must not appear in the error message.
+    assert!(
+        !err_str.contains("AAAA"),
+        "error must not leak response body content: {err_str}"
+    );
+}
+
+#[tokio::test]
+async fn test_oversized_http_error_body_rejected() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+
+    // HTTP 500 with a body larger than the configured limit.
+    let big_body = format!(
+        r#"{{"error":"internal server error details {}"}}"#,
+        "Z".repeat(200)
+    );
+
+    server
+        .mock("POST", "/")
+        .match_body(mockito::Matcher::Regex(
+            r#""method":"getHealth""#.to_string(),
+        ))
+        .with_status(500)
+        .with_header("content-type", "application/json")
+        .with_body(big_body)
+        .create();
+
+    let mut config = miyo_rpc::RpcClientConfig::new(Duration::from_secs(5));
+    config.max_response_bytes = 50;
+    let client = miyo_rpc::RpcClient::new(&url, config).expect("should create client");
+
+    let result = client.call::<Value>("getHealth", None).await;
+    assert!(
+        result.is_err(),
+        "should reject oversized HTTP error response"
+    );
+    let err_str = result.err().unwrap().to_string();
+    assert!(
+        err_str.contains("exceeds maximum size"),
+        "error should mention size limit: {err_str}"
+    );
+    // Error body content must not leak.
+    assert!(
+        !err_str.contains("ZZZ"),
+        "error must not leak response body: {err_str}"
+    );
+}
