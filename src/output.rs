@@ -28,9 +28,12 @@ static SENSITIVE_KEYS: &[&str] = &[
 ];
 
 /// Sanitize a URL by redacting any query parameters whose keys match
-/// [`SENSITIVE_KEYS`].
+/// [`SENSITIVE_KEYS`] and any userinfo (username:password) component.
 ///
-/// Returns the full URL with sensitive values replaced by `[REDACTED]`.
+/// Returns the full URL with sensitive values replaced by `REDACTED`.
+/// This prevents credentials embedded in the URL (e.g.
+/// `https://user:secret@host/rpc?api_key=x`) from leaking into output or
+/// logs.
 /// If the URL cannot be parsed, the original string is returned unchanged
 /// (the error will surface in the diagnostics).
 pub fn sanitize_url(url: &str) -> String {
@@ -39,36 +42,50 @@ pub fn sanitize_url(url: &str) -> String {
         Err(_) => return url.to_string(),
     };
 
+    let mut new_url = parsed;
+    let mut changed = false;
+
+    // Redact userinfo (username:password@host) to prevent credential leakage.
+    if !new_url.username().is_empty() || new_url.password().is_some() {
+        // set_username returns Ok even if it replaces the existing username.
+        if new_url.set_username("REDACTED").is_ok() {
+            changed = true;
+        }
+        // set_password requires the URL to have a username; we set it first.
+        if new_url.set_password(Some("REDACTED")).is_ok() {
+            changed = true;
+        }
+    }
+
     // Collect query pairs before mutating, since Url borrows.
-    let pairs: Vec<(String, String)> = parsed
+    let pairs: Vec<(String, String)> = new_url
         .query_pairs()
         .map(|(k, v)| (k.into_owned(), v.into_owned()))
         .collect();
 
-    if pairs.is_empty() {
-        return url.to_string();
-    }
+    if !pairs.is_empty() {
+        let mut new_query_parts: Vec<String> = Vec::new();
 
-    let mut new_url = parsed;
-    let mut new_query_parts: Vec<String> = Vec::new();
-    let mut changed = false;
+        for (k, v) in &pairs {
+            if SENSITIVE_KEYS.iter().any(|s| s.eq_ignore_ascii_case(k)) {
+                new_query_parts.push(format!("{}=REDACTED", urlencoding::encode(k)));
+                changed = true;
+            } else {
+                new_query_parts.push(format!(
+                    "{}={}",
+                    urlencoding::encode(k),
+                    urlencoding::encode(v)
+                ));
+            }
+        }
 
-    for (k, v) in &pairs {
-        if SENSITIVE_KEYS.iter().any(|s| s.eq_ignore_ascii_case(k)) {
-            new_query_parts.push(format!("{}=[REDACTED]", urlencoding::encode(k)));
-            changed = true;
-        } else {
-            new_query_parts.push(format!(
-                "{}={}",
-                urlencoding::encode(k),
-                urlencoding::encode(v)
-            ));
+        if changed {
+            let query_str = new_query_parts.join("&");
+            new_url.set_query(Some(&query_str));
         }
     }
 
     if changed {
-        let query_str = new_query_parts.join("&");
-        new_url.set_query(Some(&query_str));
         new_url.to_string()
     } else {
         url.to_string()

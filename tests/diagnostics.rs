@@ -278,7 +278,7 @@ async fn test_sanitize_url_redacts_secrets() {
         sanitized.contains("param=value"),
         "non-sensitive param should remain: {sanitized}"
     );
-    assert!(sanitized.contains("[REDACTED]"));
+    assert!(sanitized.contains("REDACTED"));
 }
 
 #[tokio::test]
@@ -303,7 +303,7 @@ async fn test_sanitize_url_only_secret() {
         !sanitized.contains("BearerMySecret"),
         "auth should be redacted"
     );
-    assert!(sanitized.contains("[REDACTED]"));
+    assert!(sanitized.contains("REDACTED"));
 }
 
 // ────────────────────────────
@@ -657,5 +657,49 @@ async fn test_output_never_leaks_secrets() {
         !json_output.contains("topsecret"),
         "JSON output should not contain raw token"
     );
-    assert!(json_output.contains("[REDACTED]"));
+    assert!(json_output.contains("REDACTED"));
+}
+
+#[tokio::test]
+async fn test_sanitize_url_redacts_userinfo() {
+    // Userinfo (username:password) must be redacted to prevent credential leakage.
+    let url = "https://user:secret123@example.com/rpc?api_key=mykey&param=ok";
+    let sanitized = sanitize_url(url);
+
+    assert!(
+        !sanitized.contains("secret123"),
+        "password should be redacted: {sanitized}"
+    );
+    assert!(
+        !sanitized.contains("mykey"),
+        "api_key should be redacted: {sanitized}"
+    );
+    assert!(
+        sanitized.contains("param=ok"),
+        "non-sensitive param should remain: {sanitized}"
+    );
+    assert!(sanitized.contains("example.com"));
+    assert!(sanitized.contains("/rpc"));
+    assert!(sanitized.contains("REDACTED"));
+}
+
+#[tokio::test]
+async fn test_network_error_redacts_url() {
+    // Network errors must not leak the raw URL (which may carry credentials).
+    let config = miyo_rpc::RpcClientConfig::new(Duration::from_millis(100));
+    let client = miyo_rpc::RpcClient::new("http://user:secret123@127.0.0.1:1", config)
+        .expect("should create client");
+
+    let result = client.call::<Value>("getHealth", None).await;
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    let err_str = err.to_string();
+    assert!(
+        !err_str.contains("secret123"),
+        "network error should not contain credentials: {err_str}"
+    );
+    assert!(
+        err_str.contains("REDACTED"),
+        "network error should reference sanitized endpoint: {err_str}"
+    );
 }

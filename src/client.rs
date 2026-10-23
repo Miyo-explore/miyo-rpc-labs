@@ -123,7 +123,18 @@ impl RpcClient {
         let response = match response {
             Ok(r) => r,
             Err(e) if e.is_timeout() => return Err(MiyoError::Timeout(self.config.timeout)),
-            Err(e) => return Err(MiyoError::Network(e.to_string())),
+            Err(e) => {
+                // Redact the endpoint URL before embedding it in an error
+                // message — reqwest's Display output may include the raw URL
+                // (which can carry credentials in userinfo).
+                let endpoint = crate::output::sanitize_url(&self.url);
+                let detail = if e.is_connect() {
+                    "connection failed".to_string()
+                } else {
+                    "request failed".to_string()
+                };
+                return Err(MiyoError::Network(format!("{detail} for {endpoint}")));
+            }
         };
 
         let status = response.status().as_u16();
