@@ -200,11 +200,11 @@ Summary: 5 passed, 0 failed, 0 skipped (5 ran)
 Miyo RPC Labs v0.1.0
 Endpoint: https://soroban-testnet.stellar.org
 
-  PASS httpConnectivity  (281ms)
+  PASS httpConnectivity  (270ms)
     endpoint_reachable: true
     http_status: 405
     latency_min_ms: 258
-    latency_avg_ms: 281.0
+    latency_avg_ms: 270.0
     latency_max_ms: 282
     run_count: 3
     evidence: Issued HTTP GET to https://soroban-testnet.stellar.org with timeout 15s and User-Agent 'miyo-rpc/0.1.0'.
