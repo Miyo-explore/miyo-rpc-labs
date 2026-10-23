@@ -442,7 +442,8 @@ impl DiagnosticReport {
         }
 
         // Aggregate across runs (worst status wins, durations averaged).
-        let checks = aggregate(&per_run);
+        let mut checks = aggregate(&per_run);
+        analyze_ledger_health(&per_run, &mut checks);
         let summary = summarize(&checks, runs);
         Self {
             tool_version: crate::VERSION.to_string(),
@@ -451,6 +452,34 @@ impl DiagnosticReport {
             checks,
             summary,
         }
+    }
+
+    /// Apply `--expected-network` validation after a report has been generated.
+    ///
+    /// If `expected` is a known network name, the `getNetwork` check's
+    /// passphrase detail is compared against the known passphrase. A mismatch
+    /// downgrades the check to `Fail` and the summary is recomputed so
+    /// `passed`/`failed`/`ran` stay consistent. Checks that already failed or
+    /// are skipped are left unchanged; an unknown network name is a no-op
+    /// (the CLI rejects unknown names before reaching this point).
+    pub fn enforce_expected_network(&mut self, expected: Option<&str>) {
+        if let Some(name) = expected {
+            enforce_network_identity(&mut self.checks, name);
+            self.summary = summarize(&self.checks, self.runs);
+        }
+    }
+
+    /// Compare this report's network identity and ledger state against a
+    /// second endpoint's report.
+    ///
+    /// Divergences are appended to the relevant check's `evidence` field and
+    /// do **not** change the check status or the exit-code contract — the
+    /// comparison is informational, intended to flag misconfigured or
+    /// divergent providers. Call this after `enforce_expected_network` so
+    /// passport validation applies to the primary report first.
+    pub fn compare_with(&mut self, other: &DiagnosticReport) {
+        compare_network_identity(&mut self.checks, &other.checks, &other.endpoint);
+        compare_ledger_state(&mut self.checks, &other.checks, &other.endpoint);
     }
 }
 
@@ -535,6 +564,186 @@ fn aggregate(per_run: &[Vec<CheckResult>]) -> Vec<CheckResult> {
     }
 
     aggregated
+}
+
+/// Validate the `getNetwork` check's passport against an expected network.
+///
+/// Looks up the passphrase for `expected_name`, then compares it to the
+/// `passphrase` value in the `getNetwork` check result's `details`. On
+/// mismatch, the check is downgraded to `Fail` with `IssueCategory::Other` and
+/// a descriptive `error_message`/`evidence`. Already-failing checks and
+/// skipped checks are left untouched (a skipped `getNetwork` cannot be
+/// validated).
+fn enforce_network_identity(checks: &mut [CheckResult], expected_name: &str) {
+    let passphrase = match crate::network::network_passphrase(expected_name) {
+        Some(p) => p,
+        None => return,
+    };
+    if let Some(net) = checks.iter_mut().find(|c| c.name == "getNetwork") {
+        if net.status == CheckStatus::Fail {
+            return;
+        }
+        let actual = net
+            .details
+            .as_ref()
+            .and_then(|d| d.get("passphrase"))
+            .and_then(Value::as_str);
+        if let Some(actual) = actual {
+            if actual != passphrase {
+                net.status = CheckStatus::Fail;
+                net.error = Some(IssueCategory::Other);
+                net.error_message = Some(format!(
+                    "network passphrase mismatch: expected {passphrase:?}, got {actual:?}"
+                ));
+                net.evidence = Some(format!(
+                    "Validate getNetwork passphrase against --expected-network {expected_name:?}."
+                ));
+            }
+        }
+    }
+}
+
+/// Append a ledger-health analysis to the `getLatestLedger` check's evidence.
+///
+/// Compares the ledger `sequence` and `id` (hash) across runs. Because checks
+/// execute back-to-back with no delay, a repeated sequence is **not** treated
+/// as proof of staleness — we surface "possibly stale" evidence rather than a
+/// hard `Fail` — so a verdict is only ever attached to evidence the data can
+/// substantiate. A strictly increasing sequence is healthy progress; an
+/// identical sequence *and* identical hash across consecutive runs is
+/// "possibly stale"; an identical sequence with a changing hash is a ledger
+/// inconsistency. If there is no successful `getLatestLedger` run this is a
+/// no-op (the check is already `Fail`).
+fn analyze_ledger_health(per_run: &[Vec<CheckResult>], checks: &mut [CheckResult]) {
+    let ledger = match checks.iter_mut().find(|c| c.name == "getLatestLedger") {
+        Some(c) => c,
+        None => return,
+    };
+
+    // Collect sequence + hash from every run that produced a result.
+    let mut seqs: Vec<String> = Vec::new();
+    let mut hashes: Vec<String> = Vec::new();
+    for run in per_run {
+        if let Some(lr) = run.iter().find(|c| c.name == "getLatestLedger") {
+            if let Some(details) = &lr.details {
+                if let Some(seq) = details.get("sequence").and_then(|v| v.as_str()) {
+                    seqs.push(seq.to_string());
+                }
+                if let Some(h) = details.get("id").and_then(|v| v.as_str()) {
+                    hashes.push(h.to_string());
+                }
+            }
+        }
+    }
+
+    // No successful getLatestLedger runs — already Failed by the aggregator.
+    if seqs.is_empty() {
+        return;
+    }
+
+    let existing = ledger.evidence.take().unwrap_or_default();
+    let verdict = if seqs.len() == 1 {
+        let hash = hashes.first().and_then(|h| h.get(..8)).unwrap_or("?");
+        format!(
+            " Ledger sequence {}, hash {}: self-run freshness inconclusive — use --runs > 1.",
+            seqs[0], hash
+        )
+    } else {
+        let unique_seqs: std::collections::HashSet<&str> =
+            seqs.iter().map(String::as_str).collect();
+        let unique_hashes: std::collections::HashSet<&str> =
+            hashes.iter().map(String::as_str).collect();
+        if unique_seqs.len() > 1 {
+            format!(
+                " Ledger advanced from {} to {} across {} runs — healthy.",
+                seqs.first().unwrap(),
+                seqs.last().unwrap(),
+                seqs.len()
+            )
+        } else if unique_hashes.len() == 1 {
+            let hash = hashes.first().and_then(|h| h.get(..8)).unwrap_or("?");
+            format!(
+                " Ledger sequence {} (hash {}:) unchanged across {} consecutive runs — possibly stale endpoint.",
+                seqs[0], hash, seqs.len()
+            )
+        } else {
+            format!(
+                " Ledger sequence {} stable but hash changed across {} runs — possible ledger inconsistency.",
+                seqs[0], seqs.len()
+            )
+        }
+    };
+    ledger.evidence = Some(format!("{}{}", existing, verdict));
+}
+
+/// Append network-identity (passport) divergence evidence to the `getNetwork`
+/// check when the two endpoints report different passphrases.
+fn compare_network_identity(
+    checks: &mut [CheckResult],
+    other: &[CheckResult],
+    other_endpoint: &str,
+) {
+    // Extract passports via immutable borrows first so we can safely take a
+    // mutable borrow afterwards to write evidence (avoids E0502).
+    // The field is `passphrase` (see `all_checks`).
+    let primary_pp = checks
+        .iter()
+        .find(|c| c.name == "getNetwork" && c.status == CheckStatus::Pass)
+        .and_then(|c| c.details.as_ref())
+        .and_then(|d| d.get("passphrase"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let other_pp = other
+        .iter()
+        .find(|c| c.name == "getNetwork" && c.status == CheckStatus::Pass)
+        .and_then(|c| c.details.as_ref())
+        .and_then(|d| d.get("passphrase"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    if let (Some(p), Some(o)) = (primary_pp, other_pp) {
+        if p != o {
+            if let Some(c) = checks.iter_mut().find(|c| c.name == "getNetwork") {
+                let ev = c.evidence.take().unwrap_or_default();
+                c.evidence = Some(format!(
+                    "{ev} Network divergence vs {other_endpoint}: passport '{p}' != '{o}'."
+                ));
+            }
+        }
+    }
+}
+
+/// Append ledger-state divergence evidence to the `getLatestLedger` check when
+/// the two endpoints report a different ledger sequence or hash.
+fn compare_ledger_state(checks: &mut [CheckResult], other: &[CheckResult], other_endpoint: &str) {
+    let primary = checks
+        .iter()
+        .find(|c| c.name == "getLatestLedger" && c.status == CheckStatus::Pass)
+        .and_then(|c| c.details.as_ref());
+    let other_ledger = other
+        .iter()
+        .find(|c| c.name == "getLatestLedger" && c.status == CheckStatus::Pass)
+        .and_then(|c| c.details.as_ref());
+
+    if let (Some(p), Some(o)) = (primary, other_ledger) {
+        let p_seq = p.get("sequence").and_then(|v| v.as_str()).map(String::from);
+        let o_seq = o.get("sequence").and_then(|v| v.as_str()).map(String::from);
+        let p_hash = p.get("id").and_then(|v| v.as_str()).map(String::from);
+        let o_hash = o.get("id").and_then(|v| v.as_str()).map(String::from);
+
+        if let (Some(p_seq), Some(o_seq)) = (p_seq, o_seq) {
+            if p_seq != o_seq || p_hash != o_hash {
+                if let Some(c) = checks.iter_mut().find(|c| c.name == "getLatestLedger") {
+                    let ev = c.evidence.take().unwrap_or_default();
+                    c.evidence = Some(format!(
+                        "{ev} Ledger divergence vs {other_endpoint}: sequence {p_seq} (hash {}) != {o_seq} (hash {}).",
+                        p_hash.unwrap_or_else(|| "?".to_string()),
+                        o_hash.unwrap_or_else(|| "?".to_string())
+                    ));
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -676,5 +885,206 @@ mod tests {
         assert_eq!(summary.passed, 1);
         assert_eq!(summary.failed, 0);
         assert_eq!(summary.skipped, 0);
+    }
+
+    fn make_ledger_result(seq: &str, hash: &str) -> CheckResult {
+        let mut details = serde_json::Map::new();
+        details.insert(
+            "sequence".to_string(),
+            serde_json::Value::String(seq.to_string()),
+        );
+        details.insert(
+            "id".to_string(),
+            serde_json::Value::String(hash.to_string()),
+        );
+        CheckResult {
+            name: "getLatestLedger".to_string(),
+            status: CheckStatus::Pass,
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+            duration_ms: Some(100),
+            http_status: Some(200),
+            endpoint: "https://example.com".to_string(),
+            details: Some(details),
+            error: None,
+            error_message: None,
+            evidence: None,
+        }
+    }
+
+    /// Build a report from a list of per-run check vectors, running the
+    /// ledger-health analysis exactly like `run_all` does.
+    fn ledger_evidence_from(per_run: &[Vec<CheckResult>]) -> String {
+        let mut checks = aggregate(per_run);
+        analyze_ledger_health(per_run, &mut checks);
+        checks
+            .iter()
+            .find(|c| c.name == "getLatestLedger")
+            .and_then(|c| c.evidence.clone())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn test_ledger_health_single_run_inconclusive() {
+        let per_run = vec![vec![make_ledger_result("100", "abc123def456")]];
+        let evidence = ledger_evidence_from(&per_run);
+        assert!(
+            evidence.contains("100"),
+            "should name the sequence: {evidence}"
+        );
+        assert!(
+            evidence.contains("inconclusive"),
+            "single run must be inconclusive: {evidence}"
+        );
+    }
+
+    #[test]
+    fn test_ledger_health_advancing() {
+        let per_run = vec![
+            vec![make_ledger_result("100", "h0")],
+            vec![make_ledger_result("101", "h0")],
+            vec![make_ledger_result("102", "h0")],
+        ];
+        let evidence = ledger_evidence_from(&per_run);
+        assert!(evidence.contains("advanced"), "evidence: {evidence}");
+        assert!(evidence.contains("102"), "evidence: {evidence}");
+        assert!(
+            !evidence.contains("stale"),
+            "advancing must not be stale: {evidence}"
+        );
+    }
+
+    #[test]
+    fn test_ledger_health_stagnant() {
+        let per_run = vec![
+            vec![make_ledger_result("100", "deadbeef")],
+            vec![make_ledger_result("100", "deadbeef")],
+            vec![make_ledger_result("100", "deadbeef")],
+        ];
+        let evidence = ledger_evidence_from(&per_run);
+        assert!(evidence.contains("possibly stale"), "evidence: {evidence}");
+    }
+
+    #[test]
+    fn test_ledger_health_inconsistent_hash() {
+        let per_run = vec![
+            vec![make_ledger_result("100", "aaa")],
+            vec![make_ledger_result("100", "bbb")],
+        ];
+        let evidence = ledger_evidence_from(&per_run);
+        assert!(evidence.contains("inconsistency"), "evidence: {evidence}");
+    }
+
+    #[test]
+    fn test_ledger_health_no_get_latest_ledger() {
+        let per_run = vec![vec![make_result("getHealth", CheckStatus::Pass, Some(100))]];
+        let evidence = ledger_evidence_from(&per_run);
+        assert!(
+            evidence.is_empty(),
+            "no getLatestLedger check → no ledger evidence: {evidence}"
+        );
+    }
+
+    fn make_compare_report(passport: &str, seq: &str, hash: &str) -> DiagnosticReport {
+        let mut net_details = serde_json::Map::new();
+        net_details.insert(
+            "passphrase".to_string(),
+            serde_json::Value::String(passport.to_string()),
+        );
+        let mut ledger_details = serde_json::Map::new();
+        ledger_details.insert(
+            "sequence".to_string(),
+            serde_json::Value::String(seq.to_string()),
+        );
+        ledger_details.insert(
+            "id".to_string(),
+            serde_json::Value::String(hash.to_string()),
+        );
+        DiagnosticReport {
+            tool_version: "0.1.0".to_string(),
+            endpoint: format!("https://peer-{seq}.example.com"),
+            runs: 1,
+            summary: ReportSummary {
+                ran: 2,
+                passed: 2,
+                failed: 0,
+                skipped: 0,
+                total_runs: 1,
+            },
+            checks: vec![
+                CheckResult {
+                    name: "getNetwork".to_string(),
+                    status: CheckStatus::Pass,
+                    timestamp: "2026-01-01T00:00:00Z".to_string(),
+                    duration_ms: Some(100),
+                    http_status: Some(200),
+                    endpoint: "https://primary.example.com".to_string(),
+                    details: Some(net_details),
+                    error: None,
+                    error_message: None,
+                    evidence: Some("Sent JSON-RPC 2.0 POST".to_string()),
+                },
+                CheckResult {
+                    name: "getLatestLedger".to_string(),
+                    status: CheckStatus::Pass,
+                    timestamp: "2026-01-01T00:00:00Z".to_string(),
+                    duration_ms: Some(100),
+                    http_status: Some(200),
+                    endpoint: "https://primary.example.com".to_string(),
+                    details: Some(ledger_details),
+                    error: None,
+                    error_message: None,
+                    evidence: Some("Sent JSON-RPC 2.0 POST".to_string()),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn test_compare_network_divergence() {
+        let mut primary = make_compare_report("Test SDF Network ; February 2023", "100", "abc");
+        let other = make_compare_report(
+            "Public Global Stellar Network ; September 2015",
+            "100",
+            "abc",
+        );
+        primary.compare_with(&other);
+        let evidence = primary
+            .checks
+            .iter()
+            .find(|c| c.name == "getNetwork")
+            .and_then(|c| c.evidence.as_deref())
+            .unwrap_or("");
+        assert!(
+            evidence.contains("Network divergence"),
+            "expected network divergence: {evidence}"
+        );
+    }
+
+    #[test]
+    fn test_compare_ledger_divergence() {
+        let mut primary = make_compare_report("Test SDF Network ; February 2023", "100", "abc");
+        let other = make_compare_report("Test SDF Network ; February 2023", "101", "def");
+        primary.compare_with(&other);
+        let evidence = primary
+            .checks
+            .iter()
+            .find(|c| c.name == "getLatestLedger")
+            .and_then(|c| c.evidence.as_deref())
+            .unwrap_or("");
+        assert!(
+            evidence.contains("Ledger divergence"),
+            "expected ledger divergence: {evidence}"
+        );
+    }
+
+    #[test]
+    fn test_compare_consistent() {
+        let mut primary = make_compare_report("Test SDF Network ; February 2023", "100", "abc");
+        let other = make_compare_report("Test SDF Network ; February 2023", "100", "abc");
+        primary.compare_with(&other);
+        for c in &primary.checks {
+            let ev = c.evidence.as_deref().unwrap_or("");
+            assert!(!ev.contains("divergence"), "no divergence expected: {ev}");
+        }
     }
 }

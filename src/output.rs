@@ -155,6 +155,7 @@ pub fn format_human(report: &DiagnosticReport) -> String {
 pub fn format_json(report: &DiagnosticReport) -> Result<String, serde_json::Error> {
     #[derive(Serialize)]
     struct JsonReport {
+        schema_version: String,
         tool_version: String,
         endpoint: String,
         runs: usize,
@@ -201,6 +202,7 @@ pub fn format_json(report: &DiagnosticReport) -> Result<String, serde_json::Erro
         .collect();
 
     let j = JsonReport {
+        schema_version: crate::SCHEMA_VERSION.to_string(),
         tool_version: report.tool_version.clone(),
         endpoint: report.endpoint.clone(),
         runs: report.runs,
