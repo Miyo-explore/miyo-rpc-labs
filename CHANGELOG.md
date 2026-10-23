@@ -59,8 +59,9 @@ Initial public release of the Stellar JSON-RPC diagnostics toolkit.
   `cargo test --all-targets` on PRs + push to `main` + manual dispatch.
 - Release workflow (`release.yml`): tag-triggered (`v*.*.*`), matrix builds for
   Linux x86_64, macOS Apple Silicon + Intel, and Windows x86_64; ships
-  per-target `miyo-rpc-v<VERSION>-<target>.tar.gz` + `.sha256`. `contents: release`
-  least-privilege permission; cannot fire (or publish) from PRs.
+  per-target `miyo-rpc-v<VERSION>-<target>.tar.gz` + `.sha256`. Global
+  `contents: read`, with `contents: write` granted only to the publishing job;
+  cannot fire (or publish) from PRs.
 - `CHANGELOG.md` with versioning policy (`schema_version` decoupled from crate
   version).
 

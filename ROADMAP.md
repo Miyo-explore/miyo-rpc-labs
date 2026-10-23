@@ -192,7 +192,8 @@ there is no machine-readable schema version or CI integration story.
   a changelog and a versioning policy.
 - **Scope:** CI (`ci.yml`: fmt + clippy + test, least-privilege `contents: read`),
   tag-triggered release (`release.yml`: builds `x86_64-unknown-linux-gnu`, ships
-  `.tar.gz` + `.sha256`, `contents: release` permission, cannot fire from PRs),
+  `.tar.gz` + `.sha256`, global `contents: read` with `contents: write` only on
+  the publishing job, cannot fire from PRs),
   `CHANGELOG.md` with `schema_version`-vs-crate-version policy.
 - **Dependencies:** Milestones 1–4.
 - **Priority:** P4 — process hygiene, not a feature.
