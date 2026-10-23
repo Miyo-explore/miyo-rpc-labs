@@ -34,8 +34,8 @@ or a single failed request as "the provider is down."
 
 ## Supported Checks
 
-All checks are run by default. Use `--method <NAME>` to run a single check in
-isolation.
+All checks are run by default. Use `--method <NAME>` to run a single JSON-RPC
+method check in isolation (the HTTP connectivity check always runs regardless).
 
 | Check              | Method            | Description                                                        |
 |--------------------|-------------------|--------------------------------------------------------------------|
