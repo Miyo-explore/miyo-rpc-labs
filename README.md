@@ -106,9 +106,9 @@ Verify the checksum before extracting. **Linux x86_64** (the binary inside is
 ```bash
 VERSION=0.1.0
 TARGET=x86_64-unknown-linux-gnu
-curl -L "https://github.com/Miyo-explore/miyo-rpc-labs/releases/download/v${VERSION}/miyo-rpc-v${VERSION}-${TARGET}.tar.gz" -o miyo-rpc.tar.gz
-curl -L "https://github.com/Miyo-explore/miyo-rpc-labs/releases/download/v${VERSION}/miyo-rpc-v${VERSION}-${TARGET}.tar.gz.sha256" -o miyo-rpc.tar.gz.sha256
-sha256sum -c miyo-rpc.tar.gz.sha256 && tar -xzf miyo-rpc.tar.gz && ./miyo-rpc --version
+curl -L "https://github.com/Miyo-explore/miyo-rpc-labs/releases/download/v${VERSION}/miyo-rpc-v${VERSION}-${TARGET}.tar.gz" -o "miyo-rpc-v${VERSION}-${TARGET}.tar.gz"
+curl -L "https://github.com/Miyo-explore/miyo-rpc-labs/releases/download/v${VERSION}/miyo-rpc-v${VERSION}-${TARGET}.tar.gz.sha256" -o "miyo-rpc-v${VERSION}-${TARGET}.tar.gz.sha256"
+sha256sum -c "miyo-rpc-v${VERSION}-${TARGET}.tar.gz.sha256" && tar -xzf "miyo-rpc-v${VERSION}-${TARGET}.tar.gz" && ./miyo-rpc --version
 ```
 
 **macOS** (Apple Silicon or Intel; the binary inside is `miyo-rpc`):
@@ -116,9 +116,9 @@ sha256sum -c miyo-rpc.tar.gz.sha256 && tar -xzf miyo-rpc.tar.gz && ./miyo-rpc --
 ```bash
 VERSION=0.1.0
 TARGET=aarch64-apple-darwin   # or x86_64-apple-darwin for Intel
-curl -L "https://github.com/Miyo-explore/miyo-rpc-labs/releases/download/v${VERSION}/miyo-rpc-v${VERSION}-${TARGET}.tar.gz" -o miyo-rpc.tar.gz
-curl -L "https://github.com/Miyo-explore/miyo-rpc-labs/releases/download/v${VERSION}/miyo-rpc-v${VERSION}-${TARGET}.tar.gz.sha256" -o miyo-rpc.tar.gz.sha256
-shasum -a 256 -c miyo-rpc.tar.gz.sha256 && tar -xzf miyo-rpc.tar.gz && ./miyo-rpc --version
+curl -L "https://github.com/Miyo-explore/miyo-rpc-labs/releases/download/v${VERSION}/miyo-rpc-v${VERSION}-${TARGET}.tar.gz" -o "miyo-rpc-v${VERSION}-${TARGET}.tar.gz"
+curl -L "https://github.com/Miyo-explore/miyo-rpc-labs/releases/download/v${VERSION}/miyo-rpc-v${VERSION}-${TARGET}.tar.gz.sha256" -o "miyo-rpc-v${VERSION}-${TARGET}.tar.gz.sha256"
+shasum -a 256 -c "miyo-rpc-v${VERSION}-${TARGET}.tar.gz.sha256" && tar -xzf "miyo-rpc-v${VERSION}-${TARGET}.tar.gz" && ./miyo-rpc --version
 ```
 
 **Windows** x86_64 (`miyo-rpc.exe` inside; `tar` is built into Windows 10/11):
