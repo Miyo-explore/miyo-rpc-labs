@@ -53,8 +53,8 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Build (release, frozen)
-        run: cargo build --release --frozen --target ${{ matrix.target }}
+      - name: Build (release, locked)
+        run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Package artifact
         shell: bash
