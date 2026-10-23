@@ -166,15 +166,21 @@ fn redact_sensitive_query_params(query: &str) -> String {
         .map(|p| {
             if let Some(eq_pos) = p.find('=') {
                 let key = &p[..eq_pos];
-                let decoded = urlencoding::decode(key);
-                if is_sensitive_composite_key(decoded.as_ref()) {
+                let is_sensitive = urlencoding::decode(key)
+                    .as_ref()
+                    .map(|d| is_sensitive_composite_key(d))
+                    .unwrap_or(false);
+                if is_sensitive {
                     format!("{key}=REDACTED")
                 } else {
                     p.to_string()
                 }
             } else {
-                let decoded = urlencoding::decode(p);
-                if is_sensitive_composite_key(decoded.as_ref()) {
+                let is_sensitive = urlencoding::decode(p)
+                    .as_ref()
+                    .map(|d| is_sensitive_composite_key(d))
+                    .unwrap_or(false);
+                if is_sensitive {
                     format!("{p}=REDACTED")
                 } else {
                     p.to_string()
@@ -190,11 +196,9 @@ fn redact_sensitive_query_params(query: &str) -> String {
 /// sensitive key (e.g. `my_secret` → component `secret` is sensitive).
 fn is_sensitive_composite_key(key: &str) -> bool {
     SENSITIVE_KEYS.iter().any(|s| s.eq_ignore_ascii_case(key))
-        || key
-            .split(|c: char| c == '_' || c == '-' || c == '.')
-            .any(|part| {
-                !part.is_empty() && SENSITIVE_KEYS.iter().any(|s| s.eq_ignore_ascii_case(part))
-            })
+        || key.split(['_', '-', '.']).any(|part| {
+            !part.is_empty() && SENSITIVE_KEYS.iter().any(|s| s.eq_ignore_ascii_case(part))
+        })
 }
 
 /// Redact the values of `key=value` pairs in a non-URL string where the
@@ -227,7 +231,11 @@ fn redact_raw_key_value_pairs(input: &str) -> String {
 fn looks_like_secret(s: &str) -> bool {
     // Common secret key prefixes (Stripe, Privy, etc.) — require minimum
     // length to avoid redacting short strings.
-    let has_prefix = s.starts_with("sk-") || s.starts_with("pk-") || s.starts_with("0x");
+    let has_prefix = s.starts_with("sk-")
+        || s.starts_with("sk_")
+        || s.starts_with("pk-")
+        || s.starts_with("pk_")
+        || s.starts_with("0x");
     let long_enough = s.len() >= 10;
 
     // Long hex string without dots (e.g. Ethereum key, API token).

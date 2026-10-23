@@ -643,8 +643,17 @@ mod tests {
         // Non-sensitive query param in unparseable URL
         let input2 = "https://bad host?foo=bar&sort=asc";
         let sanitized2 = crate::output::sanitize_url(input2);
-        assert!(sanitized2.contains("foo=bar"), "non-sensitive param should be preserved: {sanitized2}");
-        assert!(sanitized2.contains("sort=asc"), "non-sensitive param should be preserved: {sanitized2}");
-        assert!(!sanitized2.contains("REDACTED"), "non-sensitive params should not be redacted: {sanitized2}");
+        assert!(
+            sanitized2.contains("foo=bar"),
+            "non-sensitive param should be preserved: {sanitized2}"
+        );
+        assert!(
+            sanitized2.contains("sort=asc"),
+            "non-sensitive param should be preserved: {sanitized2}"
+        );
+        assert!(
+            !sanitized2.contains("REDACTED"),
+            "non-sensitive params should not be redacted: {sanitized2}"
+        );
     }
 }
