@@ -1,8 +1,13 @@
 name: Release
 
-# Tag-triggered only. Cannot fire from a pull request or an ordinary branch
-# push, so PR authors cannot publish a release. `permissions` is scoped to the
-# minimum required (`contents: read`); only the release job escalates.
+# Tag-triggered release pipeline. Cannot fire from a pull request or an
+# ordinary branch push, so PR authors cannot publish a release.
+#
+# Default permissions are `contents: read` (least privilege); only the
+# release job escalates to `contents: write`. The build job also needs
+# `actions: write` for `actions/upload-artifact@v4`. The `dry_run` input
+# (workflow_dispatch only) skips the GitHub Release step; ordinary tag
+# pushes always publish.
 on:
   push:
     tags:
@@ -26,13 +31,16 @@ jobs:
     name: Build & package ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: read
+      actions: write
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-          - os: macos-14
+          - os: macos-15
             target: aarch64-apple-darwin
           - os: macos-13
             target: x86_64-apple-darwin
@@ -46,18 +54,25 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Build (release, frozen)
-        run: cargo build --release --frozen
+        run: cargo build --release --frozen --target ${{ matrix.target }}
 
       - name: Package artifact
         shell: bash
         run: |
-          TAG="${GITHUB_REF_NAME#v}"
+          # Derive version: prefer the git tag (refs/tags/v*); for manual
+          # dispatches on a branch ref, fall back to Cargo.toml's version so
+          # artifact names are meaningful rather than the branch name.
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF_NAME#v}"
+          else
+            TAG=$(grep '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          fi
           if [[ "${{ matrix.target }}" == windows-* ]]; then BIN_EXT=".exe"; else BIN_EXT=""; fi
           mkdir -p dist
           # `tar` is available on all GitHub-hosted runners (incl. windows-2022's
           # bsdtar), so .tar.gz is used uniformly across platforms.
           tar -czf "dist/miyo-rpc-v${TAG}-${{ matrix.target }}.tar.gz" \
-              -C target/release "miyo-rpc${BIN_EXT}"
+              -C "target/release/${{ matrix.target }}" "miyo-rpc${BIN_EXT}"
           (cd dist && sha256sum "miyo-rpc-v${TAG}-${{ matrix.target }}.tar.gz" \
             > "miyo-rpc-v${TAG}-${{ matrix.target }}.tar.gz.sha256")
 
@@ -71,7 +86,11 @@ jobs:
   release:
     name: Publish GitHub Release
     needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Publish only for a real tag push, or an explicit non-dry-run dispatch on
+    # a tag ref. `inputs` is empty for `push` events, so `inputs.dry_run != true`
+    # is true there. A dry run skips this entire job, so it cannot create a
+    # release or upload release assets.
+    if: startsWith(github.ref, 'refs/tags/v') && inputs.dry_run != true
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -85,7 +104,6 @@ jobs:
         run: ls -la artifacts/
 
       - name: Create GitHub Release
-        if: inputs.dry_run != true
         uses: softprops/action-gh-release@v2
         with:
           files: |
