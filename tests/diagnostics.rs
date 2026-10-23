@@ -1545,3 +1545,36 @@ async fn test_batch_unparseable_url_credentials_redacted() {
 
     let _ = std::fs::remove_file(&path);
 }
+
+/// Raw key=value strings without a URL scheme must not leak credentials
+/// in batch output (error messages, JSON, human-readable).
+#[tokio::test]
+async fn test_batch_raw_key_value_no_leak() {
+    let input = "secret_key=sk-abc123value\n";
+
+    let mut path = std::env::temp_dir();
+    path.push("miyo_batch_rawkv.txt");
+    std::fs::write(&path, input).unwrap();
+
+    let args = BatchArgs {
+        file: path.to_string_lossy().to_string(),
+        output: OutputFormat::Json,
+        timeout_secs: 5,
+        runs: 1,
+        method: None,
+        concurrency: 1,
+        expected_network: None,
+    };
+    let report = miyo_rpc::run_batch(&args).await;
+    let json = miyo_rpc::format_batch_json(&report).unwrap();
+
+    assert!(!report.endpoints[0].valid);
+    assert!(
+        !json.contains("sk-abc123value"),
+        "JSON leaks raw secret: {}",
+        json
+    );
+    assert!(json.contains("REDACTED"));
+
+    let _ = std::fs::remove_file(&path);
+}

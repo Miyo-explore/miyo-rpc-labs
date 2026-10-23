@@ -546,4 +546,52 @@ mod tests {
         let url = "not a url at all";
         assert_eq!(crate::output::sanitize_url(url), url);
     }
+
+    /// Raw key=value strings without a URL scheme must also be redacted
+    /// when the key is sensitive.
+    #[test]
+    fn test_sanitize_url_raw_key_value_redacted() {
+        let input = "secret_key=sk-abc123";
+        let sanitized = crate::output::sanitize_url(input);
+        assert!(
+            !sanitized.contains("sk-abc123"),
+            "raw secret leaked: {sanitized}"
+        );
+        assert!(
+            sanitized.contains("REDACTED"),
+            "should contain REDACTED: {sanitized}"
+        );
+    }
+
+    /// Non-sensitive keys in raw key=value strings are preserved.
+    #[test]
+    fn test_sanitize_url_raw_key_value_non_sensitive_preserved() {
+        let input = "monkey=value123";
+        let sanitized = crate::output::sanitize_url(input);
+        assert_eq!(
+            sanitized, input,
+            "non-sensitive key=value should be unchanged"
+        );
+    }
+
+    /// Mixed raw key=value pairs: sensitive keys redacted, others preserved.
+    #[test]
+    fn test_sanitize_url_mixed_raw_key_value_pairs() {
+        let input = "foo=bar&secret_key=leaked&token=abc123";
+        let sanitized = crate::output::sanitize_url(input);
+        assert!(
+            !sanitized.contains("leaked"),
+            "secret_key value leaked: {sanitized}"
+        );
+        assert!(
+            !sanitized.contains("abc123"),
+            "token value leaked: {sanitized}"
+        );
+        assert!(
+            sanitized.contains("foo=bar"),
+            "non-sensitive pair should be preserved: {sanitized}"
+        );
+        assert!(sanitized.contains("secret_key=REDACTED"));
+        assert!(sanitized.contains("token=REDACTED"));
+    }
 }

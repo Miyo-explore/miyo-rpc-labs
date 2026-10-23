@@ -21,6 +21,7 @@ static SENSITIVE_KEYS: &[&str] = &[
     "authorization",
     "apikey",
     "api_key",
+    "secret_key",
     "access_token",
     "refresh_token",
     "private_key",
@@ -103,12 +104,12 @@ pub fn sanitize_url(url: &str) -> String {
 /// [`url::Url::parse`] rejects (e.g. because of an embedded space or other
 /// invalid character).
 ///
-/// Handles two cases:
+/// Handles three cases:
 /// 1. **Userinfo** — `scheme://user:pass@host` → `scheme://REDACTED:REDACTED@host`
 /// 2. **Sensitive query params** — `?api_key=secret` → `?api_key=REDACTED`
+/// 3. **Raw key=value pairs** (non-URL strings) — `secret_key=value` → `secret_key=REDACTED`
 ///
-/// If no `://` separator or no `@` after it is found and no `?` is present,
-/// the string is returned unchanged.
+/// If none of the above patterns are present, the string is returned unchanged.
 fn redact_unparseable_url(url: &str) -> String {
     let mut result = url.to_string();
 
@@ -128,6 +129,14 @@ fn redact_unparseable_url(url: &str) -> String {
         let query = &query_body[1..]; // skip '?'
         let redacted = redact_sensitive_query_params(query);
         result = format!("{}?{}", before, redacted);
+    }
+
+    // 3. For non-URL strings (no scheme://) that contain key=value pairs,
+    // redact values whose keys are sensitive. This catches raw credential
+    // strings that don't parse as URLs (e.g. "secret_key=sk-abc123") which
+    // would otherwise pass through unchanged.
+    if result.find('=').is_some() && result.find("://").is_none() {
+        result = redact_raw_key_value_pairs(&result);
     }
 
     result
@@ -161,6 +170,31 @@ fn redact_sensitive_query_params(query: &str) -> String {
 /// (case-insensitive).
 fn is_sensitive_query_key(key: &str) -> bool {
     SENSITIVE_KEYS.iter().any(|s| s.eq_ignore_ascii_case(key))
+}
+
+/// Redact the values of `key=value` pairs in a non-URL string where the
+/// key matches [`SENSITIVE_KEYS`]. Pairs are delimited by `&`.
+///
+/// This catches raw credential strings like `secret_key=sk-abc123` that
+/// don't parse as URLs and therefore bypass the standard URL-sanitization
+/// logic.
+fn redact_raw_key_value_pairs(input: &str) -> String {
+    input
+        .split('&')
+        .map(|p| {
+            if let Some(eq_pos) = p.find('=') {
+                let key = &p[..eq_pos];
+                if is_sensitive_query_key(key) {
+                    format!("{key}=REDACTED")
+                } else {
+                    p.to_string()
+                }
+            } else {
+                p.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("&")
 }
 
 // ────────────────────────────────
