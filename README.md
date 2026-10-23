@@ -92,12 +92,25 @@ Run: 2025-01-01T12:00:00Z (3s total)
 Summary: 4 passed, 1 failed, 0 skipped
 ```
 
+#### Human-readable output (repeated runs)
+
+```
+Endpoint: https://soroban-testnet.stellar.org
+Tool: miyo-rpc v0.1.0
+Runs: 3 total
+
+  httpConnectivity .... PASS   (281ms avg, 258-286ms over 3 runs)
+  getHealth ........... PASS   (262ms avg, 258-266ms over 3 runs)
+  ...
+```
+
 #### JSON output
 
 ```json
 {
   "tool_version": "0.1.0",
   "endpoint": "https://stellar-testnet.stellar.org:8999",
+  "runs": 3,
   "run_started": "2025-01-01T12:00:00Z",
   "total_duration_ms": 3142,
   "checks": [
