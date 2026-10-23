@@ -206,7 +206,7 @@ there is no machine-readable schema version or CI integration story.
 - **Objective:** Automated builds + checksummed artifacts for Linux, macOS
   (Apple Silicon + Intel), and Windows x86_64.
 - **User value:** Native binaries for all supported platforms via GitHub Releases.
-- **Scope:** matrix `release.yml` (`ubuntu-latest`, `macos-14`, `macos-13`,
+- **Scope:** matrix `release.yml` (`ubuntu-latest`, `macos-15`, `macos-15-intel`,
   `windows-2022`); uniform `miyo-rpc-v<VERSION>-<target>.tar.gz` + `.sha256`;
   per-platform install/verify instructions in README.
 - **Dependencies:** Milestone 5.
