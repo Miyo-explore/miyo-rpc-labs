@@ -2,7 +2,7 @@ name: Release
 
 # Tag-triggered only. Cannot fire from a pull request or an ordinary branch
 # push, so PR authors cannot publish a release. `permissions` is scoped to the
-# minimum required (`contents: write`).
+# minimum required (`contents: read`); only the release job escalates.
 on:
   push:
     tags:
