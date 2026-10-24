@@ -1675,3 +1675,449 @@ async fn test_batch_encoded_param_name_no_leak() {
 
     let _ = std::fs::remove_file(&path);
 }
+
+// ────────────────────────────
+// Arbitrary JSON-RPC method probe (C1)
+// ────────────────────────────
+
+async fn probe(url: &str, method: &str, params: Option<Value>) -> DiagnosticReport {
+    DiagnosticReport::run_arbitrary_probe(url, Duration::from_secs(5), method, params, 1).await
+}
+
+fn find_check<'a>(report: &'a DiagnosticReport, name: &str) -> &'a miyo_rpc::CheckResult {
+    report
+        .checks
+        .iter()
+        .find(|c| c.name == name)
+        .unwrap_or_else(|| panic!("check '{name}' missing"))
+}
+
+#[tokio::test]
+async fn test_arbitrary_object_result_passes_and_merges_keys() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+    server
+        .mock("POST", "/")
+        .match_header("content-type", "application/json")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(json_body(json!({
+            "jsonrpc": "2.0", "id": 1,
+            "result": { "ledgers": [1, 2], "count": 2 }
+        })))
+        .create_async()
+        .await;
+
+    let report = probe(&url, "getLedgerEntries", Some(json!({"keys": []}))).await;
+    let check = find_check(&report, "getLedgerEntries");
+    assert_eq!(check.status, CheckStatus::Pass);
+    let details = check.details.as_ref().expect("details present");
+    assert_eq!(details.get("count"), Some(&json!(2)));
+    assert_eq!(details.get("ledgers"), Some(&json!([1, 2])));
+    // evidence must not echo the raw params
+    let ev = check.evidence.as_deref().unwrap_or("");
+    assert!(!ev.contains("keys"), "evidence leaked params: {ev}");
+}
+
+#[tokio::test]
+async fn test_arbitrary_params_are_sent_in_request() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+    let mock = server
+        .mock("POST", "/")
+        .match_header("content-type", "application/json")
+        .match_body(mockito::Matcher::JsonString(
+            json!({
+                "jsonrpc": "2.0", "id": 1,
+                "method": "getLedgerEntries",
+                "params": { "keys": ["abc"] }
+            })
+            .to_string(),
+        ))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(json_body(
+            json!({"jsonrpc": "2.0", "id": 1, "result": {"ok": true}}),
+        ))
+        .create_async()
+        .await;
+
+    let report = probe(&url, "getLedgerEntries", Some(json!({"keys": ["abc"]}))).await;
+    assert_eq!(
+        find_check(&report, "getLedgerEntries").status,
+        CheckStatus::Pass
+    );
+    mock.assert_async().await;
+}
+
+#[tokio::test]
+async fn test_arbitrary_array_result() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+    server
+        .mock("POST", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(json_body(
+            json!({"jsonrpc": "2.0", "id": 1, "result": [1, 2, 3]}),
+        ))
+        .create_async()
+        .await;
+
+    let report = probe(&url, "getList", None).await;
+    let check = find_check(&report, "getList");
+    assert_eq!(check.status, CheckStatus::Pass);
+    assert_eq!(
+        check.details.as_ref().unwrap().get("result"),
+        Some(&json!([1, 2, 3]))
+    );
+}
+
+#[tokio::test]
+async fn test_arbitrary_scalar_and_null_results() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+    server
+        .mock("POST", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(json_body(json!({"jsonrpc": "2.0", "id": 1, "result": 42})))
+        .create_async()
+        .await;
+    let report = probe(&url, "getNumber", None).await;
+    assert_eq!(
+        find_check(&report, "getNumber")
+            .details
+            .as_ref()
+            .unwrap()
+            .get("result"),
+        Some(&json!(42))
+    );
+
+    let mut server2 = mockito::Server::new_async().await;
+    let url2 = server2.url();
+    server2
+        .mock("POST", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(json_body(
+            json!({"jsonrpc": "2.0", "id": 1, "result": null}),
+        ))
+        .create_async()
+        .await;
+    let report2 = probe(&url2, "getNothing", None).await;
+    let check2 = find_check(&report2, "getNothing");
+    assert_eq!(check2.status, CheckStatus::Pass);
+    assert_eq!(
+        check2.details.as_ref().unwrap().get("result"),
+        Some(&Value::Null)
+    );
+}
+
+#[tokio::test]
+async fn test_arbitrary_jsonrpc_error_fails() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+    server
+        .mock("POST", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(json_body(json!({
+            "jsonrpc": "2.0", "id": 1,
+            "error": { "code": -32601, "message": "method not found" }
+        })))
+        .create_async()
+        .await;
+
+    let report = probe(&url, "noSuchMethod", None).await;
+    let check = find_check(&report, "noSuchMethod");
+    assert_eq!(
+        check.status,
+        CheckStatus::Fail,
+        "JSON-RPC error must stay Fail"
+    );
+    let msg = check.error_message.as_deref().unwrap_or("");
+    assert!(msg.contains("method not found"), "error message: {msg}");
+}
+
+#[tokio::test]
+async fn test_arbitrary_malformed_response_fails_without_leaking_body() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+    server
+        .mock("POST", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("<html>not json</html>")
+        .create_async()
+        .await;
+
+    let report = probe(&url, "getBroken", None).await;
+    let check = find_check(&report, "getBroken");
+    assert_eq!(check.status, CheckStatus::Fail);
+    let blob = serde_json::to_string(&check.details).unwrap_or_default();
+    let msg = check.error_message.as_deref().unwrap_or("").to_string()
+        + check.evidence.as_deref().unwrap_or("")
+        + &blob;
+    assert!(
+        !msg.contains("not json"),
+        "malformed body must not be echoed: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn test_arbitrary_large_result_is_flagged_truncated() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+    let big = "x".repeat(5000);
+    server
+        .mock("POST", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(json_body(
+            json!({"jsonrpc": "2.0", "id": 1, "result": {"blob": big}}),
+        ))
+        .create_async()
+        .await;
+
+    let report = probe(&url, "getBig", None).await;
+    let check = find_check(&report, "getBig");
+    assert_eq!(check.status, CheckStatus::Pass);
+    let details = check.details.as_ref().unwrap();
+    assert_eq!(details.get("result_truncated"), Some(&json!(true)));
+    assert!(details.get("result_size_bytes").is_some());
+    assert!(
+        details.get("blob").is_none(),
+        "oversized result must not be stored in full"
+    );
+}
+
+#[tokio::test]
+async fn test_arbitrary_runs_aggregation_worst_status_wins() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+    let failing = server
+        .mock("POST", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(json_body(json!({
+            "jsonrpc": "2.0", "id": 1,
+            "error": { "code": -32000, "message": "boom" }
+        })))
+        .expect(1)
+        .create_async()
+        .await;
+    let passing = server
+        .mock("POST", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(json_body(
+            json!({"jsonrpc": "2.0", "id": 1, "result": {"ok": true}}),
+        ))
+        .expect(1)
+        .create_async()
+        .await;
+
+    let report =
+        DiagnosticReport::run_arbitrary_probe(&url, Duration::from_secs(5), "flaky", None, 2).await;
+    let check = find_check(&report, "flaky");
+    assert_eq!(
+        check.status,
+        CheckStatus::Fail,
+        "worst status must win across runs"
+    );
+    failing.assert_async().await;
+    passing.assert_async().await;
+}
+
+#[tokio::test]
+async fn test_arbitrary_missing_result_field_fails() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+    // Valid envelope, but no "result" and no "error" -> malformed.
+    server
+        .mock("POST", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(json_body(json!({"jsonrpc": "2.0", "id": 1})))
+        .create_async()
+        .await;
+
+    let report = probe(&url, "getNoResult", None).await;
+    let check = find_check(&report, "getNoResult");
+    assert_eq!(check.status, CheckStatus::Fail);
+    let msg = check.error_message.as_deref().unwrap_or("");
+    assert!(
+        msg.contains("result"),
+        "expected a result-field error: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn test_arbitrary_malformed_envelope_fails() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+    // Missing "jsonrpc" field -> malformed envelope.
+    server
+        .mock("POST", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(json_body(json!({"id": 1, "result": {"ok": true}})))
+        .create_async()
+        .await;
+
+    let report = probe(&url, "getBadEnvelope", None).await;
+    assert_eq!(
+        find_check(&report, "getBadEnvelope").status,
+        CheckStatus::Fail
+    );
+}
+
+#[tokio::test]
+async fn test_arbitrary_runs_zero_still_probes() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+    let m = server
+        .mock("POST", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(json_body(
+            json!({"jsonrpc": "2.0", "id": 1, "result": {"ok": true}}),
+        ))
+        .expect(1)
+        .create_async()
+        .await;
+
+    // A library caller passing runs = 0 must not get a false-success empty report.
+    let report =
+        DiagnosticReport::run_arbitrary_probe(&url, Duration::from_secs(5), "getZero", None, 0)
+            .await;
+    assert!(
+        !report.checks.is_empty(),
+        "runs=0 must not yield an empty report"
+    );
+    let check = find_check(&report, "getZero");
+    assert_eq!(check.status, CheckStatus::Pass);
+    assert_eq!(report.runs, 1, "runs=0 must be clamped to a single probe");
+    // The probe actually reached the server (mock expected exactly one POST).
+    m.assert_async().await;
+}
+
+#[tokio::test]
+async fn test_arbitrary_mode_omits_builtin_checks() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+    server
+        .mock("POST", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(json_body(
+            json!({"jsonrpc": "2.0", "id": 1, "result": {"ok": true}}),
+        ))
+        .create_async()
+        .await;
+
+    let report = probe(&url, "getLedgerEntries", None).await;
+    let names: Vec<&str> = report.checks.iter().map(|c| c.name.as_str()).collect();
+    assert!(names.contains(&"getLedgerEntries"));
+    assert!(names.contains(&"httpConnectivity"));
+    for builtin in [
+        "getHealth",
+        "getNetwork",
+        "getLatestLedger",
+        "getVersionInfo",
+    ] {
+        assert!(
+            !names.contains(&builtin),
+            "{builtin} should not run in arbitrary mode"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_arbitrary_no_param_leak_in_output() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+    server
+        .mock("POST", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(json_body(json!({
+            "jsonrpc": "2.0", "id": 1,
+            "error": { "code": -32000, "message": "denied" }
+        })))
+        .create_async()
+        .await;
+
+    let report = probe(
+        &url,
+        "getSecret",
+        Some(json!({"api_key": "SUPERSECRET123"})),
+    )
+    .await;
+    let check = find_check(&report, "getSecret");
+    let ev = check.evidence.as_deref().unwrap_or("");
+    let em = check.error_message.as_deref().unwrap_or("");
+    let det = serde_json::to_string(&check.details).unwrap_or_default();
+    for (label, blob) in [("evidence", ev), ("error", em), ("details", &det)] {
+        assert!(
+            !blob.contains("SUPERSECRET123"),
+            "secret leaked via {label}: {blob}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_builtin_method_filter_unchanged() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+    server
+        .mock("POST", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(json_body(json!({
+            "jsonrpc": "2.0", "id": 1,
+            "result": { "status": "healthy" }
+        })))
+        .create_async()
+        .await;
+
+    let report =
+        DiagnosticReport::run_all(&url, Duration::from_secs(5), Some("getHealth"), 1).await;
+    // Existing contract: every built-in check stays present; non-selected ones
+    // are reported as Skip (not omitted).
+    let names: Vec<&str> = report.checks.iter().map(|c| c.name.as_str()).collect();
+    for builtin in [
+        "getHealth",
+        "getNetwork",
+        "getLatestLedger",
+        "getVersionInfo",
+    ] {
+        assert!(names.contains(&builtin), "{builtin} should remain present");
+    }
+    assert!(names.contains(&"httpConnectivity"));
+    assert_eq!(find_check(&report, "getHealth").status, CheckStatus::Pass);
+    for other in ["getNetwork", "getLatestLedger", "getVersionInfo"] {
+        assert_eq!(
+            find_check(&report, other).status,
+            CheckStatus::Skip,
+            "{other} should be Skip when filtered out"
+        );
+    }
+}
+
+#[test]
+fn test_is_builtin_method_public() {
+    assert!(miyo_rpc::is_builtin_method("getHealth"));
+    assert!(!miyo_rpc::is_builtin_method("getLedgerEntries"));
+    assert_eq!(miyo_rpc::BUILTIN_METHODS.len(), 4);
+}
+
+#[test]
+fn test_validate_params_public() {
+    assert!(miyo_rpc::validate_params(r#"{"a":1}"#).unwrap().is_some());
+    assert!(miyo_rpc::validate_params("[1,2]").unwrap().is_some());
+    assert!(miyo_rpc::validate_params("null").unwrap().is_none());
+    assert!(miyo_rpc::validate_params("42").is_err());
+    assert!(miyo_rpc::validate_params("nope").is_err());
+}

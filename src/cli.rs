@@ -60,6 +60,16 @@ pub struct CheckArgs {
     #[arg(short = 'm', long, value_name = "METHOD")]
     pub method: Option<String>,
 
+    /// JSON-RPC `params` for the probed method: a JSON object, array, or null.
+    /// Only applies when --method names a non-built-in method.
+    #[arg(long, value_name = "JSON")]
+    pub params: Option<String>,
+
+    /// Read JSON-RPC `params` from a file (same JSON rules as --params).
+    /// Only applies when --method names a non-built-in method.
+    #[arg(long, value_name = "FILE")]
+    pub params_file: Option<String>,
+
     /// Number of diagnostic runs to perform (default: 1, max: 10).
     /// Repeats all checks and aggregates results across runs to measure
     /// reliability and latency distribution.

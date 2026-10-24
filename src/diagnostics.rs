@@ -361,6 +361,146 @@ pub fn all_checks() -> Vec<SimpleMethodCheck> {
     ]
 }
 
+/// Names of the methods that have a dedicated built-in check.
+pub const BUILTIN_METHODS: &[&str] = &[
+    "getHealth",
+    "getNetwork",
+    "getLatestLedger",
+    "getVersionInfo",
+];
+
+/// Whether `name` refers to one of the built-in checks ([`BUILTIN_METHODS`]).
+pub fn is_builtin_method(name: &str) -> bool {
+    BUILTIN_METHODS.contains(&name)
+}
+
+/// Validate a JSON-RPC `params` payload supplied as text.
+///
+/// Accepts a JSON object, array, or `null` (null maps to `Ok(None)`, meaning
+/// "no params"). Returns a human-readable error for malformed JSON or a scalar
+/// shape (JSON-RPC params must be an object or array).
+pub fn validate_params(text: &str) -> Result<Option<Value>, String> {
+    let value: Value =
+        serde_json::from_str(text).map_err(|e| format!("--params is not valid JSON: {e}"))?;
+    match value {
+        Value::Null => Ok(None),
+        Value::Object(_) | Value::Array(_) => Ok(Some(value)),
+        _ => Err("--params must be a JSON object, array, or null".to_string()),
+    }
+}
+
+/// Describe params for the evidence line without ever echoing raw values.
+fn describe_params(params: &Option<Value>) -> &'static str {
+    match params {
+        None | Some(Value::Null) => "no params",
+        Some(_) => "params (values redacted)",
+    }
+}
+
+/// Insert a JSON-RPC `result` into `details`, representing object and
+/// non-object shapes consistently and flagging truncation explicitly.
+fn insert_result(details: &mut serde_json::Map<String, Value>, result: &Value) {
+    let serialized = serde_json::to_string(result).unwrap_or_default();
+    if serialized.len() < 2048 {
+        match result {
+            Value::Object(map) => {
+                for (k, v) in map {
+                    details.entry(k.clone()).or_insert_with(|| v.clone());
+                }
+            }
+            other => {
+                details.insert("result".to_string(), other.clone());
+            }
+        }
+    } else {
+        details.insert("result_truncated".to_string(), Value::Bool(true));
+        details.insert(
+            "result_size_bytes".to_string(),
+            Value::Number(serde_json::Number::from(serialized.len())),
+        );
+    }
+}
+
+/// A probe for a single user-specified JSON-RPC method.
+///
+/// Unlike [`SimpleMethodCheck`], this carries caller-supplied `params` and does
+/// not assume a fixed result shape: the parsed `result` is represented in the
+/// report as-is (object keys merged into `details`, non-objects under
+/// `result`), with explicit truncation metadata when it exceeds the size cap.
+#[derive(Clone)]
+pub struct ArbitraryMethodCheck {
+    pub method_name: String,
+    pub params: Option<Value>,
+}
+
+impl std::fmt::Debug for ArbitraryMethodCheck {
+    /// Debug output never includes `params`: a derived `Debug` would print raw
+    /// caller-supplied values (which may be secrets) into any log or trace.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ArbitraryMethodCheck")
+            .field("method_name", &self.method_name)
+            .field("params", &"<redacted>")
+            .finish()
+    }
+}
+
+impl RpcCheck for ArbitraryMethodCheck {
+    fn name(&self) -> &str {
+        &self.method_name
+    }
+
+    fn run<'a>(
+        &'a self,
+        client: &'a RpcClient,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = CheckResult> + Send + 'a>> {
+        let method_name = self.method_name.clone();
+        let params = self.params.clone();
+        let params_desc = describe_params(&params);
+        Box::pin(async move {
+            let endpoint = client.sanitized_url();
+            let timestamp = chrono::Utc::now().to_rfc3339();
+
+            match client.call::<Value>(&method_name, params).await {
+                Ok((info, result)) => {
+                    let duration_ms = info.duration.as_millis() as u64;
+                    let mut details = serde_json::Map::new();
+                    details.insert(
+                        "description".to_string(),
+                        Value::String("Arbitrary JSON-RPC method probe.".to_string()),
+                    );
+                    details.insert(
+                        "http_status".to_string(),
+                        Value::Number(serde_json::Number::from(info.status)),
+                    );
+                    insert_result(&mut details, &result);
+
+                    CheckResult {
+                        name: method_name.clone(),
+                        status: CheckStatus::Pass,
+                        timestamp,
+                        duration_ms: Some(duration_ms),
+                        http_status: Some(info.status),
+                        endpoint: endpoint.clone(),
+                        details: if details.is_empty() { None } else { Some(details) },
+                        error: None,
+                        error_message: None,
+                        evidence: Some(format!(
+                            "Sent JSON-RPC 2.0 POST to {endpoint} with method '{method_name}' and {params_desc}."
+                        )),
+                    }
+                }
+                Err(e) => fail_result(
+                    &method_name,
+                    &endpoint,
+                    timestamp,
+                    &e,
+                    format!("Send a JSON-RPC 2.0 POST to {endpoint} with method '{method_name}' and {params_desc}."),
+                ),
+            }
+        })
+    }
+}
+
 impl DiagnosticReport {
     /// Run all diagnostic checks against the endpoint and return a full report.
     pub async fn run_all(
@@ -444,6 +584,74 @@ impl DiagnosticReport {
         // Aggregate across runs (worst status wins, durations averaged).
         let mut checks = aggregate(&per_run);
         analyze_ledger_health(&per_run, &mut checks);
+        let summary = summarize(&checks, runs);
+        Self {
+            tool_version: crate::VERSION.to_string(),
+            endpoint,
+            runs,
+            checks,
+            summary,
+        }
+    }
+
+    /// Run a single arbitrary JSON-RPC method probe (plus the raw HTTP
+    /// connectivity check) against the endpoint, `runs` times.
+    ///
+    /// Used when `--method` names a method that is not one of the built-in
+    /// checks. The method is called with the caller-supplied `params`. There is
+    /// no `getLatestLedger` check here, so ledger-health analysis is a no-op.
+    pub async fn run_arbitrary_probe(
+        url: &str,
+        timeout: Duration,
+        method: &str,
+        params: Option<Value>,
+        runs: usize,
+    ) -> Self {
+        // Guard against a false "success" on an empty report: a probe must run
+        // at least once. The CLI already clamps to [1, 10]; this keeps the
+        // library API safe for any caller.
+        let runs = runs.max(1);
+        let endpoint = sanitize_url(url);
+        let config = RpcClientConfig::new(timeout);
+        let client = match RpcClient::new(url, config) {
+            Ok(c) => c,
+            Err(e) => {
+                let timestamp = chrono::Utc::now().to_rfc3339();
+                let user_agent = format!("miyo-rpc/{}", crate::VERSION);
+                let mut checks: Vec<CheckResult> =
+                    vec![http_connectivity_check(url, timeout, &user_agent).await];
+                checks.push(fail_result(
+                    method,
+                    &endpoint,
+                    timestamp,
+                    &e,
+                    format!("Build RpcClient for {endpoint}."),
+                ));
+                let summary = summarize(&checks, 1);
+                return Self {
+                    tool_version: crate::VERSION.to_string(),
+                    endpoint,
+                    runs: 1,
+                    checks,
+                    summary,
+                };
+            }
+        };
+
+        let user_agent = format!("miyo-rpc/{}", crate::VERSION);
+
+        let mut per_run: Vec<Vec<CheckResult>> = Vec::with_capacity(runs);
+        for _ in 0..runs {
+            let mut run_results = vec![http_connectivity_check(url, timeout, &user_agent).await];
+            let probe = ArbitraryMethodCheck {
+                method_name: method.to_string(),
+                params: params.clone(),
+            };
+            run_results.push(probe.run(&client).await);
+            per_run.push(run_results);
+        }
+
+        let checks = aggregate(&per_run);
         let summary = summarize(&checks, runs);
         Self {
             tool_version: crate::VERSION.to_string(),
@@ -1086,5 +1294,123 @@ mod tests {
             let ev = c.evidence.as_deref().unwrap_or("");
             assert!(!ev.contains("divergence"), "no divergence expected: {ev}");
         }
+    }
+
+    // ────────────────────────
+    // Arbitrary-method probe helpers
+    // ────────────────────────
+
+    #[test]
+    fn test_is_builtin_method() {
+        for m in [
+            "getHealth",
+            "getNetwork",
+            "getLatestLedger",
+            "getVersionInfo",
+        ] {
+            assert!(is_builtin_method(m), "{m} should be built-in");
+        }
+        for m in [
+            "getLedgerEntries",
+            "getTransaction",
+            "simulateTransaction",
+            "",
+        ] {
+            assert!(!is_builtin_method(m), "{m} should not be built-in");
+        }
+    }
+
+    #[test]
+    fn test_validate_params_accepts_object_array_null() {
+        assert!(validate_params(r#"{"keys":["abc"]}"#).unwrap().is_some());
+        assert!(validate_params(r#"["a","b"]"#).unwrap().is_some());
+        assert!(validate_params("null").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_validate_params_rejects_scalar_and_malformed() {
+        assert!(validate_params("42").is_err());
+        assert!(validate_params("\"str\"").is_err());
+        assert!(validate_params("true").is_err());
+        assert!(validate_params("not json").is_err());
+        assert!(validate_params("{bad}").is_err());
+    }
+
+    #[test]
+    fn test_insert_result_object_keys_merged() {
+        let mut details = serde_json::Map::new();
+        insert_result(&mut details, &serde_json::json!({"a": 1, "b": "x"}));
+        assert_eq!(details.get("a"), Some(&Value::from(1)));
+        assert_eq!(details.get("b"), Some(&Value::from("x")));
+        assert!(
+            details.get("result").is_none(),
+            "object keys are merged; no synthetic 'result' key"
+        );
+    }
+
+    #[test]
+    fn test_insert_result_non_object_under_result_key() {
+        let mut details = serde_json::Map::new();
+        insert_result(&mut details, &serde_json::json!([1, 2, 3]));
+        assert_eq!(details.get("result"), Some(&serde_json::json!([1, 2, 3])));
+    }
+
+    #[test]
+    fn test_insert_result_truncation_flagged() {
+        let mut details = serde_json::Map::new();
+        let big = "x".repeat(5000);
+        insert_result(&mut details, &Value::String(big));
+        assert_eq!(details.get("result_truncated"), Some(&Value::Bool(true)));
+        assert!(details.get("result_size_bytes").is_some());
+        assert!(
+            details.get("result").is_none(),
+            "oversized result must not be stored in full"
+        );
+    }
+
+    #[test]
+    fn test_insert_result_boundary_2047_stored() {
+        let mut details = serde_json::Map::new();
+        // serialized length = 2045 chars + 2 quotes = 2047 (< 2048) -> stored.
+        insert_result(&mut details, &Value::String("x".repeat(2045)));
+        assert!(details.get("result_truncated").is_none());
+        assert!(details.get("result").is_some(), "2047 bytes must be stored");
+    }
+
+    #[test]
+    fn test_insert_result_boundary_2048_truncated() {
+        let mut details = serde_json::Map::new();
+        // serialized length = 2046 chars + 2 quotes = 2048 (not < 2048) -> truncated.
+        insert_result(&mut details, &Value::String("x".repeat(2046)));
+        assert_eq!(details.get("result_truncated"), Some(&Value::Bool(true)));
+        assert!(
+            details.get("result").is_none(),
+            "2048 bytes must be truncated"
+        );
+    }
+
+    #[test]
+    fn test_describe_params_never_echoes_values() {
+        assert_eq!(describe_params(&None), "no params");
+        assert_eq!(describe_params(&Some(Value::Null)), "no params");
+        let secret = Some(serde_json::json!({"api_key": "SUPERSECRET"}));
+        let desc = describe_params(&secret);
+        assert!(!desc.contains("SUPERSECRET"), "leaked: {desc}");
+        assert!(desc.contains("redacted"));
+    }
+
+    #[test]
+    fn test_arbitrary_method_check_debug_redacts_params() {
+        let check = ArbitraryMethodCheck {
+            method_name: "getSecret".to_string(),
+            params: Some(serde_json::json!({"api_key": "SUPERSECRET123"})),
+        };
+        let dbg = format!("{check:?}");
+        assert!(
+            !dbg.contains("SUPERSECRET123"),
+            "Debug output leaked params: {dbg}"
+        );
+        assert!(dbg.contains("getSecret"), "Debug output: {dbg}");
+        assert!(dbg.contains("<redacted>"), "Debug output: {dbg}");
     }
 }
