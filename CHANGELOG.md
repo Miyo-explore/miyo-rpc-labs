@@ -26,6 +26,31 @@ This project ships **two decoupled version numbers**:
 
 ## [Unreleased]
 
+### Added — Arbitrary JSON-RPC method probing
+- `check --method <NAME>` now probes any JSON-RPC method, not only the four
+  built-ins. Naming a built-in (`getHealth`, `getNetwork`, `getLatestLedger`,
+  `getVersionInfo`) keeps its enriched check; naming anything else runs a single
+  arbitrary-method probe (plus `httpConnectivity`).
+- `--params <JSON>` / `--params-file <FILE>` supply JSON-RPC `params` (object,
+  array, or null). Malformed JSON or a scalar shape exits `2` **before** any
+  request is sent.
+- Results are represented by shape (object keys merged into `details`;
+  non-objects under `details["result"]`); oversized results are flagged with
+  `result_truncated` + `result_size_bytes` instead of being stored silently.
+- Raw `--params` values are never echoed in `evidence`, error messages, or output.
+- In arbitrary mode, `--expected-network` and `--compare` emit a clear warning
+  (no-op) rather than running extra checks implicitly.
+- Hardening: `--params`/`--params-file` are rejected (exit 2) when unreadable,
+  oversized (> 1 MiB), or a non-regular file; a clear warning is emitted when
+  they are ignored because `--method` is absent or names a built-in.
+- Hardening: an empty/whitespace-only `--method` is rejected with exit 2 before
+  any request.
+- Hardening: `ArbitraryMethodCheck`'s `Debug` output redacts params; the library
+  API `run_arbitrary_probe` clamps `runs` to at least 1 so a caller cannot get a
+  false-success empty report.
+- Documented that a remote server may echo input into its response; the tool
+  cannot guarantee a server-echoed secret is hidden from the report.
+
 ## [0.1.0] - 2026-10-23
 
 Initial public release of the Stellar JSON-RPC diagnostics toolkit.

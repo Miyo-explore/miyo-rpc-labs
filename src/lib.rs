@@ -22,7 +22,8 @@ pub use batch::{
 pub use cli::{BatchArgs, CheckArgs, Cli, Commands, OutputFormat};
 pub use client::{RpcClient, RpcClientConfig};
 pub use diagnostics::{
-    CheckResult, CheckStatus, DiagnosticReport, IssueCategory, ReportSummary, RpcCheck,
+    is_builtin_method, validate_params, ArbitraryMethodCheck, CheckResult, CheckStatus,
+    DiagnosticReport, IssueCategory, ReportSummary, RpcCheck, BUILTIN_METHODS,
 };
 pub use error::{MiyoError, Result};
 pub use network::{known_networks, network_passphrase};

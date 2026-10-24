@@ -147,6 +147,8 @@ miyo-rpc check --url <RPC_URL> --timeout-secs 10     # override the 15s default
 miyo-rpc check --url <RPC_URL> --runs 5              # repeat 5× with latency stats
 miyo-rpc check --url <RPC_URL> --expected-network testnet  # validate network identity (testnet/mainnet)
 miyo-rpc check --url <RPC_URL> --compare <SECOND_RPC_URL>   # compare network identity + ledger against a second endpoint
+miyo-rpc check --url <RPC_URL> --method getLedgerEntries --params '{"keys":["abc..."]}'   # probe a non-built-in method with params
+miyo-rpc check --url <RPC_URL> --method simulateTransaction --params-file tx.json        # params from a file
 miyo-rpc batch --file endpoints.txt                          # diagnose many endpoints (one URL per line; see Batch Mode)
 miyo-rpc batch --file endpoints.txt --output json            # aggregated JSON (schema_version "1.0")
 miyo-rpc --help
@@ -161,7 +163,9 @@ miyo-rpc check --help
 | `--url <URL>`      | `-u`  | _required_ | The Stellar JSON-RPC endpoint URL to diagnose.                       |
 | `--output <FMT>`   | `-o`  | `human`   | `human` (colored terminal) or `json`.                                |
 | `--timeout-secs`   | `-t`  | `15`      | Maximum time to wait per HTTP request.                               |
-| `--method <NAME>`  | `-m`  | _(none)_  | Run only the named JSON-RPC method check. The HTTP connectivity check (`httpConnectivity`) always runs regardless of this flag. |
+| `--method <NAME>`  | `-m`  | _(none)_  | Run only the named JSON-RPC method. For a built-in check (`getHealth`, `getNetwork`, `getLatestLedger`, `getVersionInfo`) the enriched check runs; for any other name a single arbitrary-method probe runs with `--params`. The HTTP connectivity check (`httpConnectivity`) always runs regardless of this flag. |
+| `--params <JSON>`  |       | _(none)_  | JSON-RPC `params` for an arbitrary-method probe: a JSON object, array, or `null`. Must be valid JSON, or the CLI exits `2` before any request is sent. Raw params are never echoed in output. |
+| `--params-file <FILE>` |  | _(none)_ | Read JSON-RPC `params` from a file (same JSON rules as `--params`). |
 | `--runs <N>`       | `-n`  | `1`       | Number of diagnostic runs to perform. Clamped to the range `[1, 10]` by the CLI. |
 | `--expected-network <NAME>` | _(none)_ | Validate the endpoint's `getNetwork` passphrase against `testnet` or `mainnet`. A mismatch is reported as FAIL (exit code 1). |
 | `--compare <URL>`      | _(none)_ | Compare the primary endpoint's `getNetwork` passport + `getLatestLedger` sequence/hash against a second endpoint `<URL>`. Divergences are appended as `evidence` (informational; exit code unchanged). |
@@ -226,6 +230,41 @@ By default the tool runs every check exactly once (`--runs 1`). Use
   connectivity attempt and reports `runs = 1` (and `summary.total_runs = 1`)
   rather than the requested `--runs` value. This ensures the report never
   claims more diagnostic runs than were actually performed.
+
+## Arbitrary Method Probing
+
+By default `check` runs the four built-in checks (`getHealth`, `getNetwork`,
+`getLatestLedger`, `getVersionInfo`) plus `httpConnectivity`. To exercise a
+Soroban method that is not built in — e.g. `getLedgerEntries`, `getTransaction`,
+`getEvents`, or `simulateTransaction` — pass its name to `--method` together
+with JSON-RPC `params`:
+
+```text
+miyo-rpc check --url https://soroban-testnet.stellar.org \
+  --method getLedgerEntries --params '{"keys":["0x..."]}'
+```
+
+- `--params` accepts a JSON **object**, **array**, or `null`. Malformed JSON or
+  any other scalar shape exits with code `2` **before** any request is sent.
+- `--params-file <FILE>` reads the same JSON from a file.
+- The built-in checks are the default; naming a built-in (`getHealth`, etc.)
+  runs that enriched check exactly as before. Naming anything else runs a
+  single arbitrary-method probe with the given params (plus `httpConnectivity`).
+- The response `result` is represented in the report by its shape: an **object**
+  merges its keys into `details`; an **array / scalar / null** is stored under
+  `details["result"]`. Oversized results are **not** silently stored in full —
+  the report flags `result_truncated: true` with `result_size_bytes`.
+- A well-formed JSON-RPC **error** object stays `Fail` (exit code `1`); only a
+  valid `result` is `Pass`.
+- Raw `--params` values are **never** echoed in `evidence`, error messages, or
+  output — do not pass secrets in params.
+- A remote server may echo your input (params or the URL) back in its response.
+  The tool truncates `error.data` and `result`, but it cannot promise that a
+  server-echoed secret is hidden from the report — treat the report as sensitive.
+- In arbitrary mode `--expected-network` and `--compare` have nothing to act on;
+  the CLI prints a warning and does not run extra checks implicitly.
+- `--runs` aggregates repeated probes with worst-status-wins (a single `Fail`
+  across runs is never hidden by a `Pass`).
 
 ## Examples
 
