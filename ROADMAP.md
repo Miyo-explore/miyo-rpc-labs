@@ -108,7 +108,7 @@ benchmarking) are documented in the README "Limitations" section.
 | Deterministic test suite (mockito) | Implemented | `tests/diagnostics.rs`, `Cargo.toml:33` |
 | CI (fmt, clippy, test) | Implemented | `.github/workflows/ci.yml` |
 
-### Gaps (verified absent)
+### Gaps (historical, resolved in v0.1.0)
 
 The gaps that motivated M1–M6 were all **resolved in the `v0.1.0` release**
 (see `CHANGELOG.md`); each maps to a shipped milestone. Remaining, unaddressed

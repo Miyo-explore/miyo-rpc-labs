@@ -108,6 +108,12 @@ jobs:
     permissions:
       contents: write
     steps:
+      # The release job needs the repo (CHANGELOG.md + scripts/) to build the
+      # release notes; artifacts only carry the built binaries.
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -119,11 +125,7 @@ jobs:
       - name: Extract release notes from CHANGELOG
         run: |
           TAG="${GITHUB_REF_NAME#v}"
-          awk -v tag="## [$TAG" '
-            index($0, tag) == 1 { p = 1; next }
-            p && /^## / { exit }
-            p { print }
-          ' CHANGELOG.md > release-notes.md
+          bash scripts/extract-changelog-section.sh "$TAG" > release-notes.md
           # Fallback when CHANGELOG has no section for this tag yet
           if [ ! -s release-notes.md ]; then
             echo "v${TAG} — see the full changelog for details." > release-notes.md
