@@ -446,13 +446,28 @@ impl std::fmt::Debug for ArbitraryMethodCheck {
 
 impl RpcCheck for ArbitraryMethodCheck {
     fn name(&self) -> &str {
-        &self.method_name
+        // The probe is always paired with the internal `httpConnectivity` check.
+        // If the user's method name matches it, suffix the report name so
+        // `aggregate()` (which matches by name) keeps both checks separate.
+        if self.method_name == "httpConnectivity" {
+            "httpConnectivity (probe)"
+        } else {
+            &self.method_name
+        }
     }
 
     fn run<'a>(
         &'a self,
         client: &'a RpcClient,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = CheckResult> + Send + 'a>> {
+        // Use a distinct report name when the probe method would otherwise
+        // collide with the internal `httpConnectivity` check that always runs
+        // alongside it. The wire request still uses the original method name.
+        let report_name = if self.method_name == "httpConnectivity" {
+            "httpConnectivity (probe)".to_string()
+        } else {
+            self.method_name.clone()
+        };
         let method_name = self.method_name.clone();
         let params = self.params.clone();
         let params_desc = describe_params(&params);
@@ -475,7 +490,7 @@ impl RpcCheck for ArbitraryMethodCheck {
                     insert_result(&mut details, &result);
 
                     CheckResult {
-                        name: method_name.clone(),
+                        name: report_name.clone(),
                         status: CheckStatus::Pass,
                         timestamp,
                         duration_ms: Some(duration_ms),
@@ -490,7 +505,7 @@ impl RpcCheck for ArbitraryMethodCheck {
                     }
                 }
                 Err(e) => fail_result(
-                    &method_name,
+                    &report_name,
                     &endpoint,
                     timestamp,
                     &e,

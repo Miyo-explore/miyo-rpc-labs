@@ -1693,6 +1693,179 @@ fn find_check<'a>(report: &'a DiagnosticReport, name: &str) -> &'a miyo_rpc::Che
 }
 
 #[tokio::test]
+#[allow(non_snake_case)]
+async fn test_arbitrary_method_named_httpConnectivity_success_does_not_collide() {
+    // Regression: --method httpConnectivity produced two checks with the same
+    // name (the internal HTTP check + the JSON-RPC probe). aggregate() matched
+    // by name (first hit wins), so the probe result was silently dropped.
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+    // Internal HTTP check does a plain GET — mock it so it passes.
+    server
+        .mock("GET", "/")
+        .with_status(200)
+        .create_async()
+        .await;
+    // Probe does a JSON-RPC POST — mock it with a successful result.
+    server
+        .mock("POST", "/")
+        .match_header("content-type", "application/json")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(json_body(json!({
+            "jsonrpc": "2.0", "id": 1, "result": {"probe": "ok"}
+        })))
+        .create_async()
+        .await;
+
+    let report = probe(&url, "httpConnectivity", Some(json!({"a": 1}))).await;
+
+    // Both checks must survive aggregation under distinct names.
+    let names: Vec<&str> = report.checks.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["httpConnectivity", "httpConnectivity (probe)"],
+        "probe check must not collide with the internal HTTP check: {names:?}"
+    );
+
+    let internal = find_check(&report, "httpConnectivity");
+    assert_eq!(internal.status, CheckStatus::Pass);
+    let probe_result = find_check(&report, "httpConnectivity (probe)");
+    assert_eq!(probe_result.status, CheckStatus::Pass);
+    assert_eq!(
+        probe_result
+            .details
+            .as_ref()
+            .and_then(|d| d.get("probe"))
+            .cloned(),
+        Some(json!("ok")),
+        "probe result must be represented, not dropped by aggregation"
+    );
+    assert_eq!(report.summary.ran, 2);
+}
+
+#[tokio::test]
+#[allow(non_snake_case)]
+async fn test_arbitrary_method_named_httpConnectivity_jsonrpc_error_does_not_collide() {
+    // Same collision, but the probe fails: the Fail status must not be masked
+    // by the internal HTTP connectivity check (which passes).
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+    // Internal HTTP check does a plain GET — mock it so it passes.
+    server
+        .mock("GET", "/")
+        .with_status(200)
+        .create_async()
+        .await;
+    // Probe does a JSON-RPC POST — mock it with a JSON-RPC error.
+    server
+        .mock("POST", "/")
+        .match_header("content-type", "application/json")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(json_body(json!({
+            "jsonrpc": "2.0", "id": 1,
+            "error": {"code": -32601, "message": "Method not found"}
+        })))
+        .create_async()
+        .await;
+
+    let report = probe(&url, "httpConnectivity", Some(json!({"a": 1}))).await;
+
+    let names: Vec<&str> = report.checks.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["httpConnectivity", "httpConnectivity (probe)"],
+        "probe check must not collide with the internal HTTP check: {names:?}"
+    );
+
+    let internal = find_check(&report, "httpConnectivity");
+    assert_eq!(internal.status, CheckStatus::Pass);
+    let probe_result = find_check(&report, "httpConnectivity (probe)");
+    assert_eq!(
+        probe_result.status,
+        CheckStatus::Fail,
+        "JSON-RPC error must stay Fail even when the HTTP check passes"
+    );
+    assert_eq!(report.summary.failed, 1);
+}
+
+#[tokio::test]
+#[allow(non_snake_case)]
+async fn test_arbitrary_method_named_httpConnectivity_multi_run_aggregation() {
+    // Multi-run variant: verifies that when --method httpConnectivity is used
+    // with --runs > 1, both the internal HTTP check and the probe check remain
+    // separate in the aggregated report, and the probe follows worst-status-wins.
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+
+    // Internal HTTP check: plain GET, always passes.
+    server
+        .mock("GET", "/")
+        .with_status(200)
+        .create_async()
+        .await;
+
+    // Run 1: probe succeeds.
+    server
+        .mock("POST", "/")
+        .match_header("content-type", "application/json")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(json_body(json!({
+            "jsonrpc": "2.0", "id": 1, "result": {"run": 1}
+        })))
+        .expect(1)
+        .create_async()
+        .await;
+
+    // Run 2: probe fails with JSON-RPC error.
+    server
+        .mock("POST", "/")
+        .match_header("content-type", "application/json")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(json_body(json!({
+            "jsonrpc": "2.0", "id": 1,
+            "error": {"code": -32601, "message": "Method not found"}
+        })))
+        .expect(1)
+        .create_async()
+        .await;
+
+    let report = DiagnosticReport::run_arbitrary_probe(
+        &url,
+        Duration::from_secs(5),
+        "httpConnectivity",
+        Some(json!({"a": 1})),
+        2,
+    )
+    .await;
+
+    // Both checks must be present with distinct names after aggregation.
+    let names: Vec<&str> = report.checks.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["httpConnectivity", "httpConnectivity (probe)"],
+        "probe check must not collide with the internal HTTP check: {names:?}"
+    );
+
+    let internal = find_check(&report, "httpConnectivity");
+    assert_eq!(internal.status, CheckStatus::Pass);
+
+    let probe = find_check(&report, "httpConnectivity (probe)");
+    assert_eq!(
+        probe.status,
+        CheckStatus::Fail,
+        "probe must be Fail (worst of Pass + Fail across 2 runs)"
+    );
+    assert_eq!(report.summary.failed, 1);
+    assert_eq!(report.summary.passed, 1);
+    assert_eq!(report.summary.ran, 2);
+}
+
+#[tokio::test]
+#[allow(non_snake_case)]
 async fn test_arbitrary_object_result_passes_and_merges_keys() {
     let mut server = mockito::Server::new_async().await;
     let url = server.url();
