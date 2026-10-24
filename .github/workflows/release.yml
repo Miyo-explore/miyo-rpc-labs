@@ -108,6 +108,12 @@ jobs:
     permissions:
       contents: write
     steps:
+      # The release job needs the repo (CHANGELOG.md + scripts/) to build the
+      # release notes; artifacts only carry the built binaries.
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -116,10 +122,20 @@ jobs:
       - name: List artifacts
         run: ls -la artifacts/
 
+      - name: Extract release notes from CHANGELOG
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          bash scripts/extract-changelog-section.sh "$TAG" > release-notes.md
+          # Fallback when CHANGELOG has no section for this tag yet
+          if [ ! -s release-notes.md ]; then
+            echo "v${TAG} — see the full changelog for details." > release-notes.md
+          fi
+          echo "release notes lines: $(wc -l < release-notes.md)"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          body_path: release-notes.md
           files: |
             artifacts/miyo-rpc-*.tar.gz
-            artifacts/miyo-rpc-*.tar.gz.sha256
-          generate_release_notes: true
+            artifacts/miyo-rpc-*.sha256

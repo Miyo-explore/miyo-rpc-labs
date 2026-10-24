@@ -45,10 +45,13 @@ non-deterministic, and does not sanitize credentials embedded in URLs.
 
 ### Today's limitations
 
-The current CLI runs five fixed checks with no network-identity validation,
-no cross-run ledger progression check, no structured error taxonomy export,
-and no ability to compare multiple endpoints. URL sanitization exists, but
-there is no machine-readable schema version or CI integration story.
+v0.1.0 resolves the original roadmap gaps: network-identity validation
+(`--expected-network`), cross-run ledger progression (`--runs`), `--compare`
+for cross-endpoint divergence, machine-readable `schema_version` (`"1.0"`),
+URL sanitization, and a CI + release workflow now ship. By-design scope limits
+for the current release (plain-`GET` connectivity semantics, only four built-in
+JSON-RPC methods, no provider-specific error taxonomy, no sustained
+benchmarking) are documented in the README "Limitations" section.
 
 ## 3. Scope and Design Principles
 
@@ -88,7 +91,7 @@ there is no machine-readable schema version or CI integration story.
 
 ## 4. Current State and Gap Analysis
 
-### What exists today (verified in `main` @ f354453)
+### What exists today (verified in `main` @ a4fc479 — tag `v0.1.0`)
 
 | Capability | Status | Evidence |
 |------------|--------|----------|
@@ -105,17 +108,21 @@ there is no machine-readable schema version or CI integration story.
 | Deterministic test suite (mockito) | Implemented | `tests/diagnostics.rs`, `Cargo.toml:33` |
 | CI (fmt, clippy, test) | Implemented | `.github/workflows/ci.yml` |
 
-### Gaps (verified absent)
+### Gaps (historical, resolved in v0.1.0)
 
-| Gap | Impact |
-|-----|--------|
-| No network identity validation | A `mainnet` provider configured as `testnet` (or vice-versa) silently passes |
-| No `--expected-network` flag | Users cannot assert network identity in CI |
-| No cross-method coherence checks | e.g., `getNetwork` passphrase vs. `getLatestLedger` epoch staleness |
-| No batch / multi-endpoint mode | Comparing providers requires N invocations |
-| No JSON schema version | Machine consumers cannot detect output shape changes |
-| No release workflow | No automated releases or cross-platform builds |
-| No changelog discipline | Progress is undocumented between releases |
+The gaps that motivated M1–M6 were all **resolved in the `v0.1.0` release**
+(see `CHANGELOG.md`); each maps to a shipped milestone. Remaining, unaddressed
+limitations are tracked in the README "Limitations" section:
+
+| Gap | Resolution |
+|-----|------------|
+| No network identity validation | resolved (M1: `--expected-network`) |
+| No `--expected-network` flag | resolved (M1) |
+| No cross-method coherence checks | resolved (M4: `--compare` passport + ledger drift) |
+| No batch / multi-endpoint mode | resolved (M4) |
+| No JSON schema version | resolved (M2: `schema_version = "1.0"`) |
+| No release workflow | resolved (M5: `release.yml`, live for `v0.1.0`) |
+| No changelog discipline | resolved (M5: `CHANGELOG.md`) |
 
 ## 5. Phased Development Plan
 
@@ -198,10 +205,11 @@ there is no machine-readable schema version or CI integration story.
 - **Dependencies:** Milestones 1–4.
 - **Priority:** P4 — process hygiene, not a feature.
 - **Validation:** YAML lint clean; local `cargo fmt --check` / `cargo clippy -D
-  warnings` / `cargo test --all-targets` green. Hosted CI/release **not**
-  executed in this session.
+  warnings` / `cargo test --all-targets` green. Hosted CI green on every `main`
+  push; tag release executed for `v0.1.0` (release workflow run `40001191938`,
+  success).
 
-### Milestone 6 — Cross-Platform Releases (in progress)
+### Milestone 6 — Cross-Platform Releases (implemented — shipped in `v0.1.0`)
 
 - **Objective:** Automated builds + checksummed artifacts for Linux, macOS
   (Apple Silicon + Intel), and Windows x86_64.
@@ -211,8 +219,9 @@ there is no machine-readable schema version or CI integration story.
   per-platform install/verify instructions in README.
 - **Dependencies:** Milestone 5.
 - **Priority:** P3.
-- **Validation:** YAML lint clean; release matrix targets compile-checked per-OS.
-  Hosted release **not** executed in this session (no tag cut).
+- **Validation:** YAML lint clean; all four matrix targets compiled and packaged
+  on hosted runners for `v0.1.0` (release workflow run `40001191938` — 4 builds
+  + publish success).
 
 ## 6. Success Criteria
 
@@ -236,11 +245,11 @@ there is no machine-readable schema version or CI integration story.
 
 ## 8. Immediate Next Steps
 
-M1–M5 are complete and green. M6 (cross-platform release matrix) is in progress.
+M1–M6 are complete and shipped in `v0.1.0`.
 
 - **Completed (M5):** CI + tag-triggered releases with checksummed binaries;
   `CHANGELOG.md` + versioning policy (`schema_version` decoupled from crate version).
-- **In progress (M6):** multi-platform release matrix (Linux/macOS-Windows),
+- **Completed (M6):** multi-platform release matrix (Linux/macOS-Windows),
   per-platform install instructions.
 - **Next (not a milestone):** gather user feedback after the first tagged release.
 
