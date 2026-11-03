@@ -26,6 +26,22 @@ This project ships **two decoupled version numbers**:
 
 ## [Unreleased]
 
+### Added — HTTP 429 rate-limit classification
+- HTTP `429 Too Many Requests` is now classified as `rate_limited`, distinct
+  from generic `ClientError`. Other 4xx statuses remain `ClientError`; 5xx
+  remains `ServerError`; transport and JSON-RPC classification are unchanged.
+- The `Retry-After` response header is surfaced on the failing check under
+  `details.retry_after` (raw value, either delta-seconds or an HTTP-date).
+  When it parses as an integer, `details.retry_after_secs` is added as well.
+  Nothing is synthesised when the header is absent or non-numeric.
+- Batch diagnostics inherit the classification and retry fields through the
+  shared per-endpoint report serializer; no logic is duplicated.
+- The CLI does **not** retry requests automatically. There is no backoff or
+  throttle-recovery behaviour.
+- Behaviour change: a 429 previously reported as `client_error` now reports as
+  `rate_limited`. This is an additive enum variant under the documented
+  `schema_version` policy, so no schema bump is required.
+
 ### Added — Arbitrary JSON-RPC method probing
 - `check --method <NAME>` now probes any JSON-RPC method, not only the four
   built-ins. Naming a built-in (`getHealth`, `getNetwork`, `getLatestLedger`,

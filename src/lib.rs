@@ -25,9 +25,9 @@ pub use diagnostics::{
     is_builtin_method, validate_params, ArbitraryMethodCheck, CheckResult, CheckStatus,
     DiagnosticReport, IssueCategory, ReportSummary, RpcCheck, BUILTIN_METHODS,
 };
-pub use error::{MiyoError, Result};
+pub use error::{ErrorCategory, MiyoError, Result};
 pub use network::{known_networks, network_passphrase};
-pub use output::sanitize_url;
+pub use output::{format_human, format_json, sanitize_url};
 
 /// Schema version for machine-readable JSON reports. Bumped (major) when the
 /// JSON structure changes in a non-backwards-compatible way: a field is removed,

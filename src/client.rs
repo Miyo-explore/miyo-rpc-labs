@@ -167,6 +167,7 @@ impl RpcClient {
                                 max,
                                 bytes.len()
                             ),
+                            retry_after: None,
                         });
                     }
                 }
@@ -201,9 +202,24 @@ impl RpcClient {
             } else {
                 body_str.clone()
             };
+
+            // For a 429, preserve the raw `Retry-After` header verbatim. It may
+            // be delta-seconds or an HTTP-date; we never parse it into a
+            // duration here and never invent a value when it is absent.
+            let retry_after = if status == 429 {
+                headers
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+            } else {
+                None
+            };
+
             return Err(MiyoError::HttpError {
                 status,
                 body: truncated,
+                retry_after,
             });
         }
 

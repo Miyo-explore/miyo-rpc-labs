@@ -61,6 +61,12 @@ method check in isolation (the HTTP connectivity check always runs regardless).
 - HTTP connectivity is measured with a plain `GET` request. Stellar JSON-RPC
   endpoints often return `405 Method Not Allowed` for `GET`; this is still
   reported as **Pass** because the HTTP endpoint was reachable.
+- HTTP `429 Too Many Requests` is classified as **`rate_limited`** (distinct
+  from other 4xx client errors) and the response's `Retry-After` header is
+  surfaced in `details` as `retry_after` (raw value) and, when it parses as an
+  integer, `retry_after_secs`. The CLI **does not retry** — no automatic retry,
+  backoff, or throttling logic exists. Wait for the indicated interval and run
+  the command again yourself.
 - Only the four built-in no-parameter JSON-RPC methods are checked, plus the
   HTTP connectivity probe.
 - JSON-RPC error codes are classified (`-32601`, `-32602`, `-32603`, etc.) but
