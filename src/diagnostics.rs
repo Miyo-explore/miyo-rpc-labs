@@ -49,6 +49,8 @@ pub enum IssueCategory {
     Transport,
     /// HTTP 4xx or 5xx status.
     HttpError,
+    /// HTTP 429: the endpoint is reachable but is rate-limiting this client.
+    RateLimited,
     /// Response body was not valid JSON / malformed RPC structure.
     MalformedResponse,
     /// JSON-RPC error object returned by the server.
@@ -68,6 +70,7 @@ impl IssueCategory {
             ErrorCategory::Transport => IssueCategory::Transport,
             ErrorCategory::ServerError => IssueCategory::HttpError,
             ErrorCategory::ClientError => IssueCategory::HttpError,
+            ErrorCategory::RateLimited => IssueCategory::RateLimited,
             ErrorCategory::MalformedResponse => IssueCategory::MalformedResponse,
             ErrorCategory::UnsupportedMethod => IssueCategory::UnsupportedMethod,
             ErrorCategory::JsonRpcError => IssueCategory::JsonRpcError,
@@ -321,6 +324,25 @@ fn fail_result(
     let message = err.to_string();
     let category = IssueCategory::from_error(err);
 
+    // For a rate-limited response, surface the server-supplied `Retry-After`
+    // verbatim plus its numeric seconds form when it parses as an integer.
+    // Nothing is synthesised when the header is absent or non-numeric.
+    let details = match err {
+        MiyoError::HttpError {
+            status: 429,
+            retry_after: Some(raw),
+            ..
+        } => {
+            let mut d = serde_json::Map::new();
+            d.insert("retry_after".to_string(), Value::String(raw.clone()));
+            if let Ok(secs) = raw.trim().parse::<u64>() {
+                d.insert("retry_after_secs".to_string(), Value::from(secs));
+            }
+            Some(d)
+        }
+        _ => None,
+    };
+
     CheckResult {
         name: name.to_string(),
         status: CheckStatus::Fail,
@@ -328,7 +350,7 @@ fn fail_result(
         duration_ms: None,
         http_status: None,
         endpoint: endpoint.to_string(),
-        details: None,
+        details,
         error: Some(category),
         error_message: Some(message),
         evidence: Some(evidence),

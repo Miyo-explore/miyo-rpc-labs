@@ -21,8 +21,16 @@ pub enum MiyoError {
     Network(String),
 
     /// The HTTP response had a non-200 status code.
+    ///
+    /// `retry_after` carries the raw `Retry-After` response header when the
+    /// server provided one for a 429 response. It is preserved verbatim (it may
+    /// be either a delta-seconds integer or an HTTP-date) and is never invented.
     #[error("HTTP {status}: {body}")]
-    HttpError { status: u16, body: String },
+    HttpError {
+        status: u16,
+        body: String,
+        retry_after: Option<String>,
+    },
 
     /// The response body was not valid JSON.
     #[error("invalid JSON response")]
@@ -63,6 +71,10 @@ impl MiyoError {
     pub fn category(&self) -> ErrorCategory {
         match self {
             MiyoError::Network(_) | MiyoError::Timeout(_) => ErrorCategory::Transport,
+            // 429 is distinct from other 4xx: the endpoint is reachable and
+            // configured correctly, but is throttling this client. Retrieved
+            // before the generic 4xx arm so it is not bucketed as ClientError.
+            MiyoError::HttpError { status, .. } if *status == 429 => ErrorCategory::RateLimited,
             MiyoError::HttpError { status, .. } if *status >= 500 => ErrorCategory::ServerError,
             MiyoError::HttpError { status, .. } if *status >= 400 => ErrorCategory::ClientError,
             MiyoError::HttpError { .. } => ErrorCategory::Transport,
@@ -89,6 +101,8 @@ pub enum ErrorCategory {
     ServerError,
     /// HTTP 4xx (not JSON-RPC errors).
     ClientError,
+    /// HTTP 429: the endpoint is reachable but is rate-limiting this client.
+    RateLimited,
     /// Response body was not parseable JSON.
     MalformedResponse,
     /// A well-formed JSON-RPC -32601 error: method not found / unsupported.
@@ -99,4 +113,53 @@ pub enum ErrorCategory {
     Configuration,
     /// Anything else.
     Unknown,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn http(status: u16) -> MiyoError {
+        MiyoError::HttpError {
+            status,
+            body: String::new(),
+            retry_after: None,
+        }
+    }
+
+    #[test]
+    fn test_429_is_rate_limited() {
+        assert_eq!(http(429).category(), ErrorCategory::RateLimited);
+    }
+
+    #[test]
+    fn test_404_is_client_error() {
+        assert_eq!(http(404).category(), ErrorCategory::ClientError);
+    }
+
+    #[test]
+    fn test_500_is_server_error() {
+        assert_eq!(http(500).category(), ErrorCategory::ServerError);
+    }
+
+    #[test]
+    fn test_503_is_server_error() {
+        assert_eq!(http(503).category(), ErrorCategory::ServerError);
+    }
+
+    #[test]
+    fn test_other_4xx_remain_client_error() {
+        for status in [400, 401, 403, 418, 499] {
+            assert_eq!(
+                http(status).category(),
+                ErrorCategory::ClientError,
+                "status {status} must stay ClientError"
+            );
+        }
+    }
+
+    #[test]
+    fn test_3xx_stays_transport() {
+        assert_eq!(http(302).category(), ErrorCategory::Transport);
+    }
 }

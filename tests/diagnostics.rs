@@ -2294,3 +2294,205 @@ fn test_validate_params_public() {
     assert!(miyo_rpc::validate_params("42").is_err());
     assert!(miyo_rpc::validate_params("nope").is_err());
 }
+
+// ────────────────────────────
+// HTTP 429 rate-limit classification
+// ────────────────────────────
+
+/// A 429 response must classify as `RateLimited`, not `ClientError`.
+#[tokio::test]
+async fn test_http_429_classified_rate_limited() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+    server
+        .mock("POST", "/")
+        .with_status(429)
+        .with_header("content-type", "text/plain")
+        .with_body("Too Many Requests")
+        .create_async()
+        .await;
+
+    let config = RpcClientConfig::new(Duration::from_secs(5));
+    let client = RpcClient::new(&url, config).expect("should create client");
+
+    let err = client
+        .call::<Value>("getHealth", None)
+        .await
+        .expect_err("429 must fail");
+    assert_eq!(err.category(), miyo_rpc::ErrorCategory::RateLimited);
+}
+
+/// A 429 with an integer `Retry-After` surfaces the raw value and its seconds.
+#[tokio::test]
+async fn test_http_429_retry_after_integer() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+    server
+        .mock("POST", "/")
+        .with_status(429)
+        .with_header("retry-after", "30")
+        .with_header("content-type", "application/json")
+        .with_body("{\"error\":\"slow down\"}")
+        .create_async()
+        .await;
+
+    let report =
+        DiagnosticReport::run_all(&url, Duration::from_secs(5), Some("getHealth"), 1).await;
+    let check = report
+        .checks
+        .iter()
+        .find(|c| c.name == "getHealth")
+        .expect("getHealth check present");
+
+    assert_eq!(check.status, CheckStatus::Fail);
+    assert_eq!(check.error, Some(miyo_rpc::IssueCategory::RateLimited));
+    let details = check.details.as_ref().expect("details present");
+    assert_eq!(details.get("retry_after"), Some(&json!("30")));
+    assert_eq!(details.get("retry_after_secs"), Some(&json!(30)));
+}
+
+/// An HTTP-date `Retry-After` is preserved verbatim without panicking and
+/// without inventing a seconds value.
+#[tokio::test]
+async fn test_http_429_retry_after_http_date() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+    let date = "Wed, 21 Oct 2026 07:28:00 GMT";
+    server
+        .mock("POST", "/")
+        .with_status(429)
+        .with_header("retry-after", date)
+        .with_header("content-type", "application/json")
+        .with_body("{\"error\":\"slow down\"}")
+        .create_async()
+        .await;
+
+    let report =
+        DiagnosticReport::run_all(&url, Duration::from_secs(5), Some("getHealth"), 1).await;
+    let check = report
+        .checks
+        .iter()
+        .find(|c| c.name == "getHealth")
+        .expect("getHealth check present");
+
+    assert_eq!(check.error, Some(miyo_rpc::IssueCategory::RateLimited));
+    let details = check.details.as_ref().expect("details present");
+    assert_eq!(details.get("retry_after"), Some(&json!(date)));
+    assert!(
+        details.get("retry_after_secs").is_none(),
+        "non-numeric Retry-After must not produce retry_after_secs"
+    );
+}
+
+/// A 429 without `Retry-After` still classifies correctly and adds no detail keys.
+#[tokio::test]
+async fn test_http_429_without_retry_after() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+    server
+        .mock("POST", "/")
+        .with_status(429)
+        .with_header("content-type", "application/json")
+        .with_body("{\"error\":\"slow down\"}")
+        .create_async()
+        .await;
+
+    let report =
+        DiagnosticReport::run_all(&url, Duration::from_secs(5), Some("getHealth"), 1).await;
+    let check = report
+        .checks
+        .iter()
+        .find(|c| c.name == "getHealth")
+        .expect("getHealth check present");
+
+    assert_eq!(check.error, Some(miyo_rpc::IssueCategory::RateLimited));
+    assert!(
+        check.details.is_none(),
+        "no details must be added when Retry-After is absent"
+    );
+}
+
+/// JSON output must expose `rate_limited` and the retry fields.
+#[tokio::test]
+async fn test_http_429_json_output_fields() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+    server
+        .mock("POST", "/")
+        .with_status(429)
+        .with_header("retry-after", "12")
+        .with_header("content-type", "application/json")
+        .with_body("{\"error\":\"slow down\"}")
+        .create_async()
+        .await;
+
+    let report =
+        DiagnosticReport::run_all(&url, Duration::from_secs(5), Some("getHealth"), 1).await;
+    let json_out = miyo_rpc::format_json(&report).expect("json serializes");
+    let parsed: Value = serde_json::from_str(&json_out).expect("valid JSON");
+
+    let check = parsed["checks"]
+        .as_array()
+        .expect("checks array")
+        .iter()
+        .find(|c| c["name"] == "getHealth")
+        .expect("getHealth in JSON");
+
+    // NOTE: `format_json` JSON-encodes the IssueCategory into a string, so the
+    // value is a quoted token (pre-existing behavior, unchanged here).
+    assert_eq!(
+        check["error"].as_str().unwrap().trim_matches('"'),
+        "rate_limited"
+    );
+    assert_eq!(check["details"]["retry_after"], json!("12"));
+    assert_eq!(check["details"]["retry_after_secs"], json!(12));
+}
+
+/// Batch diagnostics inherit the same classification per endpoint.
+#[tokio::test]
+async fn test_batch_429_classification_per_endpoint() {
+    let mut server = mockito::Server::new_async().await;
+    let base = server.url();
+    server
+        .mock("POST", "/")
+        .with_status(429)
+        .with_header("retry-after", "7")
+        .with_header("content-type", "application/json")
+        .with_body("{\"error\":\"slow down\"}")
+        .create_async()
+        .await;
+
+    let dir = std::env::temp_dir().join(format!("miyo-batch-429-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let file = dir.join("endpoints.txt");
+    std::fs::write(&file, format!("{base}/\n")).expect("write endpoints");
+
+    let args = BatchArgs {
+        file: file.to_string_lossy().to_string(),
+        output: OutputFormat::Json,
+        timeout_secs: 5,
+        runs: 1,
+        method: Some("getHealth".to_string()),
+        concurrency: 1,
+        expected_network: None,
+    };
+
+    let report = miyo_rpc::run_batch(&args).await;
+    let entry = report.endpoints.first().expect("one entry");
+    let value = entry.report.as_ref().expect("report present");
+    let check = value["checks"]
+        .as_array()
+        .expect("checks array")
+        .iter()
+        .find(|c| c["name"] == "getHealth")
+        .expect("getHealth in batch JSON");
+
+    assert_eq!(
+        check["error"].as_str().unwrap().trim_matches('"'),
+        "rate_limited"
+    );
+    assert_eq!(check["details"]["retry_after"], json!("7"));
+    assert_eq!(check["details"]["retry_after_secs"], json!(7));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
