@@ -40,6 +40,31 @@ Do not suppress warnings or skip tests to obtain a green CI result.
 4. Open a PR with a clear description of the problem and the fix.
 5. Wait for CI to pass. Do not merge until CI is green.
 
+## Drips Wave tasks
+
+Some issues are funded through [Drips Wave](https://www.drips.network/)
+and carry the `drips-wave` label plus one `complexity:*` label, which sets
+the reward for the task:
+
+| Label | Reward |
+| --- | --- |
+| `complexity: trivial` | 100 pts |
+| `complexity: medium` | 150 pts |
+| `complexity: high` | 200 pts |
+
+How to take a Wave task:
+
+1. Pick an open issue labelled `drips-wave` and comment that you are
+   taking it, so two people do not work on the same task.
+2. Fork the repo and create a branch from `main` (`feat/...`, `fix/...`,
+   `test/...`, or `docs/...`).
+3. Implement the change with tests. Use the issue template
+   (`.github/ISSUE_TEMPLATE/drips_wave_task.md`) acceptance criteria as
+   your checklist.
+4. Open a PR that links the issue (`Closes #N`) and wait for CI to go
+   green and for a maintainer review. Do not merge until CI is green.
+5. Rewards for completed Wave tasks are paid in Stellar USDC via Drips.
+
 ## License
 
 By contributing, you agree that your contributions are made available under
