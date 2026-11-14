@@ -690,6 +690,122 @@ async fn test_sanitize_url_redacts_userinfo() {
 }
 
 #[tokio::test]
+async fn test_sanitize_url_ipv6_userinfo() {
+    // IPv6 literal with userinfo credentials: credentials must be redacted
+    // while the bracketed host and port are preserved.
+    let url = "http://user:pass@[::1]:8000/";
+    let sanitized = sanitize_url(url);
+    assert!(
+        !sanitized.contains("user:pass"),
+        "userinfo credentials should be redacted: {sanitized}"
+    );
+    assert!(
+        sanitized.contains("[::1]:8000"),
+        "IPv6 host and port should be preserved: {sanitized}"
+    );
+    assert!(sanitized.contains("REDACTED"));
+}
+
+#[tokio::test]
+async fn test_sanitize_url_ipv6_sensitive_query() {
+    // IPv6 literal with a sensitive query parameter: the secret value must
+    // be redacted while non-sensitive parameters survive.
+    let url = "http://[2001:db8::1]:8000/rpc?api_key=secret123&x=1";
+    let sanitized = sanitize_url(url);
+    assert!(
+        !sanitized.contains("secret123"),
+        "api_key should be redacted: {sanitized}"
+    );
+    assert!(
+        sanitized.contains("x=1"),
+        "non-sensitive param should remain: {sanitized}"
+    );
+    assert!(
+        sanitized.contains("[2001:db8::1]:8000"),
+        "IPv6 host and port should be preserved: {sanitized}"
+    );
+    assert!(sanitized.contains("REDACTED"));
+}
+
+#[tokio::test]
+async fn test_sanitize_url_ipv6_malformed_userinfo() {
+    // Malformed IPv6 literal (unclosed bracket) that fails to parse:
+    // the fallback path must still redact the embedded credentials.
+    let url = "http://user:pass@[::1:8000/";
+    let sanitized = sanitize_url(url);
+    assert!(
+        !sanitized.contains("user:pass"),
+        "userinfo credentials should be redacted: {sanitized}"
+    );
+    assert!(
+        sanitized.contains("[::1:8000/"),
+        "host portion should be preserved: {sanitized}"
+    );
+    assert!(sanitized.contains("REDACTED"));
+}
+
+#[tokio::test]
+async fn test_sanitize_url_idn_userinfo() {
+    // Internationalized hostname with userinfo credentials. The `url`
+    // crate normalizes the host to punycode; credentials must be redacted
+    // regardless of the hostname encoding.
+    let url = "https://user:pass@münchen.example/rpc";
+    let sanitized = sanitize_url(url);
+    assert!(
+        !sanitized.contains("user:pass"),
+        "userinfo credentials should be redacted: {sanitized}"
+    );
+    assert!(
+        sanitized.contains("xn--mnchen-3ya.example"),
+        "punycode host should be preserved: {sanitized}"
+    );
+    assert!(sanitized.contains("/rpc"));
+    assert!(sanitized.contains("REDACTED"));
+}
+
+#[tokio::test]
+async fn test_sanitize_url_idn_sensitive_query() {
+    // Punycode hostname with a sensitive query parameter.
+    let url = "https://xn--mnchen-3ya.example/rpc?token=abc456&ok=yes";
+    let sanitized = sanitize_url(url);
+    assert!(
+        !sanitized.contains("abc456"),
+        "token should be redacted: {sanitized}"
+    );
+    assert!(
+        sanitized.contains("ok=yes"),
+        "non-sensitive param should remain: {sanitized}"
+    );
+    assert!(
+        sanitized.contains("xn--mnchen-3ya.example"),
+        "IDN host should be preserved: {sanitized}"
+    );
+    assert!(sanitized.contains("REDACTED"));
+}
+
+#[tokio::test]
+async fn test_sanitize_url_malformed_ipv6_with_credentials() {
+    // Malformed URL (space in the query) containing an IPv6 literal and
+    // credentials: the fallback path must redact both the userinfo and the
+    // sensitive query parameter.
+    let url = "http://user:pass@[::1]:8000/rpc?api_key=secret with space";
+    let sanitized = sanitize_url(url);
+    assert!(
+        !sanitized.contains("user:pass"),
+        "userinfo credentials should be redacted: {sanitized}"
+    );
+    assert!(
+        !sanitized.contains("secret"),
+        "api_key should be redacted: {sanitized}"
+    );
+    assert!(
+        sanitized.contains("[::1]:8000"),
+        "IPv6 host and port should be preserved: {sanitized}"
+    );
+    assert!(sanitized.contains("REDACTED"));
+}
+
+#[tokio::test]
 async fn test_network_error_redacts_url() {
     // Network errors must not leak the raw URL (which may carry credentials).
     let config = miyo_rpc::RpcClientConfig::new(Duration::from_millis(100));
