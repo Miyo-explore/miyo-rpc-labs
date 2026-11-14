@@ -95,3 +95,70 @@ fn test_check_invalid_scheme_rejected() {
         "output should show FAIL for invalid scheme"
     );
 }
+
+#[test]
+fn test_check_empty_method_rejected() {
+    // An empty --method is a usage error (exit code 2) rejected before any
+    // network request is made. The URL is unreachable on purpose: the guard
+    // must fire before the client is even constructed.
+    let output = Command::new(BIN)
+        .args(["check", "--url", "http://127.0.0.1:1", "--method", ""])
+        .output()
+        .expect("failed to execute miyo-rpc check");
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "empty --method should exit with code 2"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("empty"),
+        "stderr should mention 'empty', got: {stderr}"
+    );
+}
+
+#[test]
+fn test_check_whitespace_method_rejected() {
+    let output = Command::new(BIN)
+        .args(["check", "--url", "http://127.0.0.1:1", "--method", "   "])
+        .output()
+        .expect("failed to execute miyo-rpc check");
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "whitespace-only --method should exit with code 2"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("empty"),
+        "stderr should mention 'empty', got: {stderr}"
+    );
+}
+
+#[test]
+fn test_check_valid_method_not_rejected_with_code_2() {
+    // A valid built-in method must not trigger the empty-method guard.
+    // The loopback URL refuses the connection immediately, so the run
+    // fails with code 1 (failed checks) — never code 2 — and no live
+    // endpoint is contacted.
+    let output = Command::new(BIN)
+        .args([
+            "check",
+            "--url",
+            "http://127.0.0.1:1",
+            "--method",
+            "getHealth",
+        ])
+        .output()
+        .expect("failed to execute miyo-rpc check");
+    assert_ne!(
+        output.status.code(),
+        Some(2),
+        "valid --method must not exit with code 2"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("must not be empty"),
+        "valid --method must not trigger the empty-method guard, got: {stderr}"
+    );
+}
