@@ -546,14 +546,28 @@ impl DiagnosticReport {
         method_filter: Option<&str>,
         runs: usize,
     ) -> Self {
+        Self::run_all_with_config(url, RpcClientConfig::new(timeout), method_filter, runs).await
+    }
+
+    /// Run all diagnostic checks with an explicit [`RpcClientConfig`].
+    ///
+    /// Same as [`run_all`](Self::run_all) but honors the config's
+    /// `user_agent` and `max_response_bytes` overrides (used by the
+    /// `--user-agent` / `--max-response-bytes` CLI flags).
+    pub async fn run_all_with_config(
+        url: &str,
+        config: RpcClientConfig,
+        method_filter: Option<&str>,
+        runs: usize,
+    ) -> Self {
         let endpoint = sanitize_url(url);
-        let config = RpcClientConfig::new(timeout);
+        let timeout = config.timeout;
+        let user_agent = config.user_agent.clone();
         let client = match RpcClient::new(url, config) {
             Ok(c) => c,
             Err(e) => {
                 // Can't even build a client — every check fails.
                 let timestamp = chrono::Utc::now().to_rfc3339();
-                let user_agent = format!("miyo-rpc/{}", crate::VERSION);
 
                 let mut checks: Vec<CheckResult> = all_checks()
                     .iter()
@@ -583,8 +597,6 @@ impl DiagnosticReport {
                 };
             }
         };
-
-        let user_agent = format!("miyo-rpc/{}", crate::VERSION);
 
         // Run diagnostics `runs` times, collecting raw results for aggregation.
         let mut per_run: Vec<Vec<CheckResult>> = Vec::with_capacity(runs);
@@ -644,17 +656,39 @@ impl DiagnosticReport {
         params: Option<Value>,
         runs: usize,
     ) -> Self {
+        Self::run_arbitrary_probe_with_config(
+            url,
+            RpcClientConfig::new(timeout),
+            method,
+            params,
+            runs,
+        )
+        .await
+    }
+
+    /// Run a single arbitrary-method probe with an explicit
+    /// [`RpcClientConfig`].
+    ///
+    /// Same as [`run_arbitrary_probe`](Self::run_arbitrary_probe) but honors
+    /// the config's `user_agent` and `max_response_bytes` overrides.
+    pub async fn run_arbitrary_probe_with_config(
+        url: &str,
+        config: RpcClientConfig,
+        method: &str,
+        params: Option<Value>,
+        runs: usize,
+    ) -> Self {
         // Guard against a false "success" on an empty report: a probe must run
         // at least once. The CLI already clamps to [1, 10]; this keeps the
         // library API safe for any caller.
         let runs = runs.max(1);
         let endpoint = sanitize_url(url);
-        let config = RpcClientConfig::new(timeout);
+        let timeout = config.timeout;
+        let user_agent = config.user_agent.clone();
         let client = match RpcClient::new(url, config) {
             Ok(c) => c,
             Err(e) => {
                 let timestamp = chrono::Utc::now().to_rfc3339();
-                let user_agent = format!("miyo-rpc/{}", crate::VERSION);
                 let mut checks: Vec<CheckResult> =
                     vec![http_connectivity_check(url, timeout, &user_agent).await];
                 checks.push(fail_result(
@@ -674,8 +708,6 @@ impl DiagnosticReport {
                 };
             }
         };
-
-        let user_agent = format!("miyo-rpc/{}", crate::VERSION);
 
         let mut per_run: Vec<Vec<CheckResult>> = Vec::with_capacity(runs);
         for _ in 0..runs {
