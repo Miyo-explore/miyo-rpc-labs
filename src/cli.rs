@@ -86,6 +86,16 @@ pub struct CheckArgs {
     /// `evidence` on the relevant checks (informational; not a failure).
     #[arg(long, value_name = "URL")]
     pub compare: Option<String>,
+
+    /// Override the HTTP `User-Agent` header sent with requests
+    /// (default: `miyo-rpc/<VERSION>`).
+    #[arg(long, value_name = "STRING")]
+    pub user_agent: Option<String>,
+
+    /// Maximum response body size in bytes (default: 10 MiB).
+    /// Must be greater than zero.
+    #[arg(long, value_name = "N")]
+    pub max_response_bytes: Option<usize>,
 }
 
 /// Arguments for the `batch` subcommand (multiple endpoints from a file).

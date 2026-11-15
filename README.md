@@ -175,6 +175,8 @@ miyo-rpc check --help
 | `--runs <N>`       | `-n`  | `1`       | Number of diagnostic runs to perform. Clamped to the range `[1, 10]` by the CLI. |
 | `--expected-network <NAME>` | _(none)_ | Validate the endpoint's `getNetwork` passphrase against `testnet` or `mainnet`. A mismatch is reported as FAIL (exit code 1). |
 | `--compare <URL>`      | _(none)_ | Compare the primary endpoint's `getNetwork` passport + `getLatestLedger` sequence/hash against a second endpoint `<URL>`. Divergences are appended as `evidence` (informational; exit code unchanged). |
+| `--user-agent <STRING>` | _(none)_ | `miyo-rpc/<VERSION>` | Override the HTTP `User-Agent` header sent with requests. Useful when a gateway, proxy, or rate limiter filters on `User-Agent`. |
+| `--max-response-bytes <N>` | _(none)_ | `10485760` (10 MiB) | Maximum response body size in bytes. A larger response is rejected as an error instead of being buffered. Must be greater than zero (exit code `2` otherwise). |
 | `--help`           |       |           | Show help.                                                                                |
 | `--version`        |       |           | Print version and exit.                                                                   |
 
@@ -184,6 +186,11 @@ miyo-rpc check --help
 > `getVersionInfo`). Method checks that do not match are reported as `SKIP`
 > with `evidence` set to `"Skipped: --method filter does not match this
 > check."`.
+
+> **`--user-agent` / `--max-response-bytes`:** both apply to the `check`
+> subcommand only. The `--compare` endpoint reuses the same client settings
+> (same `User-Agent`, same response cap). They do not affect `batch`, which
+> keeps the defaults.
 
 ### Exit codes
 

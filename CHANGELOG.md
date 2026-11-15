@@ -26,6 +26,16 @@ This project ships **two decoupled version numbers**:
 
 ## [Unreleased]
 
+### Added — RPC client flags (`--user-agent`, `--max-response-bytes`)
+- `check --user-agent <STRING>` overrides the HTTP `User-Agent` header sent
+  with requests (default stays `miyo-rpc/<VERSION>`). The override also
+  applies to the `httpConnectivity` check and to the `--compare` endpoint.
+- `check --max-response-bytes <N>` exposes the 10 MiB response-size cap
+  (default unchanged). A larger response is rejected with an error naming
+  the cap instead of being buffered into memory.
+- `--max-response-bytes 0` and non-numeric values exit `2` **before** any
+  request is sent. Both flags are `check`-only; `batch` keeps the defaults.
+
 ### Added — HTTP 429 rate-limit classification
 - HTTP `429 Too Many Requests` is now classified as `rate_limited`, distinct
   from generic `ClientError`. Other 4xx statuses remain `ClientError`; 5xx

@@ -162,3 +162,74 @@ fn test_check_valid_method_not_rejected_with_code_2() {
         "valid --method must not trigger the empty-method guard, got: {stderr}"
     );
 }
+
+#[test]
+fn test_check_max_response_bytes_zero_rejected() {
+    // A zero cap is a usage error (exit code 2) rejected before any
+    // network request is made. The URL is unreachable on purpose: the
+    // guard must fire before the client is even constructed.
+    let output = Command::new(BIN)
+        .args([
+            "check",
+            "--url",
+            "http://127.0.0.1:1",
+            "--max-response-bytes",
+            "0",
+        ])
+        .output()
+        .expect("failed to execute miyo-rpc check");
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "zero --max-response-bytes should exit with code 2"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("greater than 0"),
+        "stderr should mention the bound, got: {stderr}"
+    );
+}
+
+#[test]
+fn test_check_max_response_bytes_non_numeric_rejected() {
+    // clap rejects a non-numeric value for the usize flag with exit code 2.
+    let output = Command::new(BIN)
+        .args([
+            "check",
+            "--url",
+            "http://127.0.0.1:1",
+            "--max-response-bytes",
+            "abc",
+        ])
+        .output()
+        .expect("failed to execute miyo-rpc check");
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "non-numeric --max-response-bytes should exit with code 2"
+    );
+}
+
+#[test]
+fn test_check_user_agent_flag_accepted() {
+    // The flag must parse cleanly. The loopback URL refuses the connection
+    // immediately, so the run fails with code 1 (failed checks) — never
+    // code 2 — and no live endpoint is contacted.
+    let output = Command::new(BIN)
+        .args([
+            "check",
+            "--url",
+            "http://127.0.0.1:1",
+            "--method",
+            "getHealth",
+            "--user-agent",
+            "custom/1.0",
+        ])
+        .output()
+        .expect("failed to execute miyo-rpc check");
+    assert_ne!(
+        output.status.code(),
+        Some(2),
+        "--user-agent should be accepted, not rejected as a usage error"
+    );
+}

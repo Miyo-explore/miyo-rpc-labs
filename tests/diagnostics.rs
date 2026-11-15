@@ -916,6 +916,201 @@ async fn test_oversized_http_error_body_rejected() {
 }
 
 // ────────────────────────────────
+// RPC client flag tests (--user-agent, --max-response-bytes)
+// ────────────────────────────────
+
+#[test]
+fn test_rpc_client_config_defaults_and_builders() {
+    let default = RpcClientConfig::default();
+    assert_eq!(
+        default.user_agent,
+        format!("miyo-rpc/{}", miyo_rpc::VERSION),
+        "default User-Agent must stay miyo-rpc/<VERSION>"
+    );
+    assert_eq!(
+        default.max_response_bytes,
+        10 * 1024 * 1024,
+        "default response cap must stay 10 MiB"
+    );
+    assert!(default.follow_redirects);
+
+    let custom = RpcClientConfig::new(Duration::from_secs(5))
+        .with_user_agent("custom/1.0")
+        .with_max_response_bytes(1024);
+    assert_eq!(custom.user_agent, "custom/1.0");
+    assert_eq!(custom.max_response_bytes, 1024);
+    // The builders touch only their own field.
+    assert_eq!(custom.timeout, Duration::from_secs(5));
+    assert!(custom.follow_redirects);
+}
+
+#[tokio::test]
+async fn test_default_user_agent_sent_on_wire() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+
+    let expected_ua = format!("miyo-rpc/{}", miyo_rpc::VERSION);
+    let mock = server
+        .mock("POST", "/")
+        .match_header("user-agent", expected_ua.as_str())
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(json_body(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": { "status": "healthy" }
+        })))
+        .create_async()
+        .await;
+
+    let config = RpcClientConfig::new(Duration::from_secs(5));
+    let client = RpcClient::new(&url, config).expect("should create client");
+
+    let result = client.call::<Value>("getHealth", None).await;
+    assert!(result.is_ok(), "call should succeed");
+
+    mock.assert_async().await;
+}
+
+#[tokio::test]
+async fn test_custom_user_agent_sent_on_wire() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+
+    let mock = server
+        .mock("POST", "/")
+        .match_header("user-agent", "custom/1.0")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(json_body(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": { "status": "healthy" }
+        })))
+        .create_async()
+        .await;
+
+    let config = RpcClientConfig::new(Duration::from_secs(5)).with_user_agent("custom/1.0");
+    let client = RpcClient::new(&url, config).expect("should create client");
+
+    let result = client.call::<Value>("getHealth", None).await;
+    assert!(result.is_ok(), "call should succeed");
+
+    mock.assert_async().await;
+}
+
+#[tokio::test]
+async fn test_report_with_custom_user_agent() {
+    // The override must flow through run_all_with_config into both the
+    // httpConnectivity GET and the JSON-RPC POST, and the connectivity
+    // evidence must name the custom value.
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+
+    let get_mock = server
+        .mock("GET", "/")
+        .match_header("user-agent", "custom/1.0")
+        .with_status(200)
+        .create_async()
+        .await;
+
+    server
+        .mock("POST", "/")
+        .match_header("user-agent", "custom/1.0")
+        .match_body(mockito::Matcher::Regex(
+            r#""method":"getHealth""#.to_string(),
+        ))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(json_body(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "status": "healthy",
+                "latestLedger": 100,
+                "oldestLedger": 50,
+                "ledgerRetentionWindow": 50
+            }
+        })))
+        .create();
+
+    let config = RpcClientConfig::new(Duration::from_secs(5)).with_user_agent("custom/1.0");
+    let report = DiagnosticReport::run_all_with_config(&url, config, Some("getHealth"), 1).await;
+
+    let health_check = report
+        .checks
+        .iter()
+        .find(|c| c.name == "getHealth")
+        .expect("should have getHealth check");
+    assert_eq!(health_check.status, CheckStatus::Pass);
+
+    let http_check = report
+        .checks
+        .iter()
+        .find(|c| c.name == "httpConnectivity")
+        .expect("should have httpConnectivity check");
+    assert_eq!(http_check.status, CheckStatus::Pass);
+    assert!(
+        http_check
+            .evidence
+            .as_deref()
+            .unwrap_or("")
+            .contains("custom/1.0"),
+        "connectivity evidence should name the custom User-Agent: {:?}",
+        http_check.evidence
+    );
+
+    get_mock.assert_async().await;
+}
+
+#[tokio::test]
+async fn test_report_max_response_bytes_rejects_oversized() {
+    // A small cap wired through run_all_with_config must make an oversized
+    // getHealth response fail the check with the size-limit error.
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+
+    let payload = "A".repeat(200);
+    let body = format!(
+        r#"{{"jsonrpc":"2.0","id":1,"result":{{"status":"healthy","big":"{}"}}}}"#,
+        payload
+    );
+
+    server
+        .mock("POST", "/")
+        .match_body(mockito::Matcher::Regex(
+            r#""method":"getHealth""#.to_string(),
+        ))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(body)
+        .create();
+
+    let config = RpcClientConfig::new(Duration::from_secs(5)).with_max_response_bytes(50);
+    let report = DiagnosticReport::run_all_with_config(&url, config, Some("getHealth"), 1).await;
+
+    let health_check = report
+        .checks
+        .iter()
+        .find(|c| c.name == "getHealth")
+        .expect("should have getHealth check");
+    assert_eq!(
+        health_check.status,
+        CheckStatus::Fail,
+        "oversized response should fail the check"
+    );
+    let msg = health_check.error_message.clone().unwrap_or_default();
+    assert!(
+        msg.contains("exceeds maximum size"),
+        "error should mention size limit: {msg}"
+    );
+    assert!(
+        !msg.contains("AAAA"),
+        "error must not leak response body content: {msg}"
+    );
+}
+
+// ────────────────────────────────
 // Multi-run latency aggregation tests
 // ────────────────────────────────
 

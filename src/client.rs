@@ -49,6 +49,24 @@ impl RpcClientConfig {
             ..Default::default()
         }
     }
+
+    /// Override the `User-Agent` header sent with requests.
+    ///
+    /// The default (`miyo-rpc/<VERSION>`) is unchanged when this is not
+    /// called.
+    pub fn with_user_agent(mut self, user_agent: impl Into<String>) -> Self {
+        self.user_agent = user_agent.into();
+        self
+    }
+
+    /// Override the maximum response body size in bytes.
+    ///
+    /// The default ([`DEFAULT_MAX_RESPONSE_BYTES`]) is unchanged when this
+    /// is not called.
+    pub fn with_max_response_bytes(mut self, max_response_bytes: usize) -> Self {
+        self.max_response_bytes = max_response_bytes;
+        self
+    }
 }
 
 /// A minimal JSON-RPC 2.0 client that talks to Stellar RPC endpoints.

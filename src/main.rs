@@ -1,7 +1,7 @@
 //! Entry point for the `miyo-rpc` binary.
 
 use clap::Parser;
-use miyo_rpc::{BatchArgs, CheckArgs, Cli, DiagnosticReport, OutputFormat};
+use miyo_rpc::{BatchArgs, CheckArgs, Cli, DiagnosticReport, OutputFormat, RpcClientConfig};
 use std::io::Read;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -97,6 +97,14 @@ fn run_check(args: CheckArgs) -> ExitCode {
         }
     }
 
+    // Validate --max-response-bytes before doing any network work.
+    if let Some(max) = args.max_response_bytes {
+        if max == 0 {
+            eprintln!("error: --max-response-bytes must be greater than 0");
+            return ExitCode::from(2);
+        }
+    }
+
     // Validate --expected-network before doing any network work.
     if let Some(net) = &args.expected_network {
         if miyo_rpc::network_passphrase(net).is_none() {
@@ -141,20 +149,49 @@ fn run_check(args: CheckArgs) -> ExitCode {
     let timeout = Duration::from_secs(args.timeout_secs);
     let runs = std::cmp::min(args.runs.max(1), 10) as usize;
 
+    // Build the client config from the CLI flags. Defaults are preserved
+    // exactly when --user-agent / --max-response-bytes are absent.
+    let mut client_config = RpcClientConfig::new(timeout);
+    if let Some(ua) = &args.user_agent {
+        client_config = client_config.with_user_agent(ua.clone());
+    }
+    if let Some(max) = args.max_response_bytes {
+        client_config = client_config.with_max_response_bytes(max);
+    }
+
     let report = if arbitrary {
         let method = args.method.as_deref().expect("arbitrary implies --method");
         rt.block_on(async {
-            DiagnosticReport::run_arbitrary_probe(&args.url, timeout, method, params, runs).await
+            DiagnosticReport::run_arbitrary_probe_with_config(
+                &args.url,
+                client_config,
+                method,
+                params,
+                runs,
+            )
+            .await
         })
     } else {
         let mut report = rt.block_on(async {
-            DiagnosticReport::run_all(&args.url, timeout, args.method.as_deref(), runs).await
+            DiagnosticReport::run_all_with_config(
+                &args.url,
+                client_config.clone(),
+                args.method.as_deref(),
+                runs,
+            )
+            .await
         });
         report.enforce_expected_network(args.expected_network.as_deref());
 
         if let Some(compare_url) = &args.compare {
             let compare_report = rt.block_on(async {
-                DiagnosticReport::run_all(compare_url, timeout, None, runs).await
+                DiagnosticReport::run_all_with_config(
+                    compare_url,
+                    client_config.clone(),
+                    None,
+                    runs,
+                )
+                .await
             });
             report.compare_with(&compare_report);
         }
