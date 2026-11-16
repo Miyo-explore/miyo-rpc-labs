@@ -233,3 +233,78 @@ fn test_check_user_agent_flag_accepted() {
         "--user-agent should be accepted, not rejected as a usage error"
     );
 }
+
+/// Local server that 302-redirects `/` to `/target`, which answers with a
+/// healthy JSON-RPC result. Used to prove `--no-follow-redirects` end to
+/// end (loopback only; no live endpoint is contacted).
+fn redirect_mock_server() -> mockito::ServerGuard {
+    let mut server = mockito::Server::new();
+    let target = format!("{}/target", server.url());
+    server
+        .mock("POST", "/")
+        .with_status(302)
+        .with_header("location", target.as_str())
+        .create();
+    server
+        .mock("GET", "/")
+        .with_status(302)
+        .with_header("location", target.as_str())
+        .create();
+    // reqwest converts POST to GET when following a 302, so the target
+    // mock answers GET. The same 200 also satisfies the httpConnectivity
+    // check (any status < 500 passes).
+    server
+        .mock("GET", "/target")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"jsonrpc":"2.0","id":1,"result":{"status":"healthy","latestLedger":51583040,"oldestLedger":51565760,"ledgerRetentionWindow":17281}}"#)
+        .create();
+    server
+}
+
+#[test]
+fn test_check_follows_redirects_by_default() {
+    let server = redirect_mock_server();
+    let url = server.url();
+    let output = Command::new(BIN)
+        .args(["check", "--url", &url, "--method", "getHealth"])
+        .output()
+        .expect("failed to execute miyo-rpc check");
+    assert!(
+        output.status.success(),
+        "redirect should be followed by default, got exit {:?}: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
+fn test_check_no_follow_redirects_reports_302() {
+    // With the flag set, the getHealth check fails on the 302 (exit 1)
+    // and the 3xx status is reported in the output. The httpConnectivity
+    // check uses its own client and still follows the redirect, so it
+    // passes in both modes.
+    let server = redirect_mock_server();
+    let url = server.url();
+    let output = Command::new(BIN)
+        .args([
+            "check",
+            "--url",
+            &url,
+            "--method",
+            "getHealth",
+            "--no-follow-redirects",
+        ])
+        .output()
+        .expect("failed to execute miyo-rpc check");
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "unfollowed 302 should fail the check with exit 1"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("302"),
+        "output should report the 302 status, got: {stdout}"
+    );
+}

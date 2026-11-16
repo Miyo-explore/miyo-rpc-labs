@@ -151,7 +151,7 @@ miyo-rpc check --url <RPC_URL> --output json         # machine-readable JSON
 miyo-rpc check --url <RPC_URL> --method getHealth    # one JSON-RPC check (httpConnectivity still runs)
 miyo-rpc check --url <RPC_URL> --timeout-secs 10     # override the 15s default
 miyo-rpc check --url <RPC_URL> --runs 5              # repeat 5× with latency stats
-miyo-rpc check --url <RPC_URL> --expected-network testnet  # validate network identity (testnet/mainnet)
+miyo-rpc check --url <RPC_URL> --expected-network testnet  # validate network identity (testnet/mainnet/futurenet)
 miyo-rpc check --url <RPC_URL> --compare <SECOND_RPC_URL>   # compare network identity + ledger against a second endpoint
 miyo-rpc check --url <RPC_URL> --method getLedgerEntries --params '{"keys":["abc..."]}'   # probe a non-built-in method with params
 miyo-rpc check --url <RPC_URL> --method simulateTransaction --params-file tx.json        # params from a file
@@ -173,10 +173,11 @@ miyo-rpc check --help
 | `--params <JSON>`  |       | _(none)_  | JSON-RPC `params` for an arbitrary-method probe: a JSON object, array, or `null`. Must be valid JSON, or the CLI exits `2` before any request is sent. Raw params are never echoed in output. |
 | `--params-file <FILE>` |  | _(none)_ | Read JSON-RPC `params` from a file (same JSON rules as `--params`). |
 | `--runs <N>`       | `-n`  | `1`       | Number of diagnostic runs to perform. Clamped to the range `[1, 10]` by the CLI. |
-| `--expected-network <NAME>` | _(none)_ | Validate the endpoint's `getNetwork` passphrase against `testnet` or `mainnet`. A mismatch is reported as FAIL (exit code 1). |
+| `--expected-network <NAME>` | _(none)_ | Validate the endpoint's `getNetwork` passphrase against `testnet`, `mainnet`, or `futurenet`. A mismatch is reported as FAIL (exit code 1). |
 | `--compare <URL>`      | _(none)_ | Compare the primary endpoint's `getNetwork` passport + `getLatestLedger` sequence/hash against a second endpoint `<URL>`. Divergences are appended as `evidence` (informational; exit code unchanged). |
 | `--user-agent <STRING>` | _(none)_ | `miyo-rpc/<VERSION>` | Override the HTTP `User-Agent` header sent with requests. Useful when a gateway, proxy, or rate limiter filters on `User-Agent`. |
 | `--max-response-bytes <N>` | _(none)_ | `10485760` (10 MiB) | Maximum response body size in bytes. A larger response is rejected as an error instead of being buffered. Must be greater than zero (exit code `2` otherwise). |
+| `--no-follow-redirects` | _(none)_ | _follow_ | Do not follow HTTP redirects. A 3xx response is reported in the check result instead of being followed to a different host. |
 | `--help`           |       |           | Show help.                                                                                |
 | `--version`        |       |           | Print version and exit.                                                                   |
 
@@ -187,10 +188,11 @@ miyo-rpc check --help
 > with `evidence` set to `"Skipped: --method filter does not match this
 > check."`.
 
-> **`--user-agent` / `--max-response-bytes`:** both apply to the `check`
-> subcommand only. The `--compare` endpoint reuses the same client settings
-> (same `User-Agent`, same response cap). They do not affect `batch`, which
-> keeps the defaults.
+> **`--user-agent` / `--max-response-bytes` / `--no-follow-redirects`:** all
+> three apply to the `check` subcommand only. The `--compare` endpoint
+> reuses the same client settings (same `User-Agent`, same response cap,
+> same redirect policy). They do not affect `batch`, which keeps the
+> defaults.
 
 ### Exit codes
 
@@ -203,7 +205,9 @@ miyo-rpc check --help
 ## Network Identity Validation
 
 `--expected-network <NAME>` validates the endpoint's `getNetwork` passphrase
-against a known Stellar network passphrase (`testnet` or `mainnet`). If the
+against a known Stellar network passphrase (`testnet`, `mainnet`, or
+`futurenet`). Standalone (private/local) networks use custom passphrases and
+cannot be validated with this flag. If the
 endpoint reports a different network, the `getNetwork` check is downgraded to
 `Failed` with `IssueCategory::Other`, and `summary.passed`/`failed`/`ran` are
 recomputed so they stay consistent:

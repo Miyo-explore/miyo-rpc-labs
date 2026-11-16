@@ -26,6 +26,16 @@ This project ships **two decoupled version numbers**:
 
 ## [Unreleased]
 
+### Added — RPC client flag (`--no-follow-redirects`) and `futurenet` network
+- `check --no-follow-redirects` disables following HTTP redirects (default
+  stays follow). A 3xx response is reported in the check result (`HTTP 302: …`)
+  instead of silently following the redirect to a different host.
+  `check`-only; `batch` keeps the defaults.
+- `futurenet` is now a known network for `--expected-network`
+  (`Test SDF Future Network ; October 2022`, per the Stellar developer docs).
+  Lookup stays case-insensitive. Standalone networks still cannot be
+  validated — their passphrases are custom by definition.
+
 ### Added — RPC client flags (`--user-agent`, `--max-response-bytes`)
 - `check --user-agent <STRING>` overrides the HTTP `User-Agent` header sent
   with requests (default stays `miyo-rpc/<VERSION>`). The override also

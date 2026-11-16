@@ -67,6 +67,14 @@ impl RpcClientConfig {
         self.max_response_bytes = max_response_bytes;
         self
     }
+
+    /// Override whether HTTP redirects are followed.
+    ///
+    /// The default (`true`) is unchanged when this is not called.
+    pub fn with_follow_redirects(mut self, follow_redirects: bool) -> Self {
+        self.follow_redirects = follow_redirects;
+        self
+    }
 }
 
 /// A minimal JSON-RPC 2.0 client that talks to Stellar RPC endpoints.

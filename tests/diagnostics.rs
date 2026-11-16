@@ -942,6 +942,104 @@ fn test_rpc_client_config_defaults_and_builders() {
     // The builders touch only their own field.
     assert_eq!(custom.timeout, Duration::from_secs(5));
     assert!(custom.follow_redirects);
+
+    let no_redirects = RpcClientConfig::new(Duration::from_secs(5)).with_follow_redirects(false);
+    assert!(!no_redirects.follow_redirects);
+    // Only the redirect policy changes; everything else stays default.
+    assert_eq!(no_redirects.timeout, Duration::from_secs(5));
+    assert_eq!(
+        no_redirects.user_agent,
+        format!("miyo-rpc/{}", miyo_rpc::VERSION)
+    );
+    assert_eq!(no_redirects.max_response_bytes, 10 * 1024 * 1024);
+}
+
+/// A 302 redirect is followed by default: the client ends up at the
+/// redirect target and the JSON-RPC call succeeds.
+#[tokio::test]
+async fn test_redirect_followed_by_default() {
+    let mut server = mockito::Server::new_async().await;
+    let target = format!("{}/target", server.url());
+
+    let redirect = server
+        .mock("POST", "/")
+        .with_status(302)
+        .with_header("location", target.as_str())
+        .create_async()
+        .await;
+
+    // reqwest converts POST to GET when following a 302, so the target
+    // mock answers GET.
+    let target_mock = server
+        .mock("GET", "/target")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(json_body(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "status": "healthy",
+                "latestLedger": 51583040,
+                "oldestLedger": 51565760,
+                "ledgerRetentionWindow": 17281
+            }
+        })))
+        .create_async()
+        .await;
+
+    let config = RpcClientConfig::new(Duration::from_secs(5));
+    let client = RpcClient::new(&server.url(), config).expect("should create client");
+
+    let result = client.call::<Value>("getHealth", None).await;
+    assert!(result.is_ok(), "redirect should be followed by default");
+    let (info, body) = result.unwrap();
+    assert_eq!(info.status, 200);
+    assert_eq!(body.get("status").and_then(|v| v.as_str()), Some("healthy"));
+
+    redirect.assert_async().await;
+    target_mock.assert_async().await;
+}
+
+/// With redirect following disabled, the same 302 is reported as an
+/// HTTP error instead of being followed: the target is never contacted.
+#[tokio::test]
+async fn test_redirect_not_followed_with_policy_none() {
+    let mut server = mockito::Server::new_async().await;
+    let target = format!("{}/target", server.url());
+
+    let redirect = server
+        .mock("POST", "/")
+        .with_status(302)
+        .with_header("location", target.as_str())
+        .create_async()
+        .await;
+
+    let target_mock = server
+        .mock("GET", "/target")
+        .expect(0)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(json_body(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": { "status": "healthy" }
+        })))
+        .create_async()
+        .await;
+
+    let config = RpcClientConfig::new(Duration::from_secs(5)).with_follow_redirects(false);
+    let client = RpcClient::new(&server.url(), config).expect("should create client");
+
+    let result = client.call::<Value>("getHealth", None).await;
+    assert!(result.is_err(), "redirect must not be followed");
+    let err_str = result.err().unwrap().to_string();
+    assert!(
+        err_str.contains("302"),
+        "error should report the 302 status: {err_str}"
+    );
+
+    redirect.assert_async().await;
+    target_mock.assert_async().await;
 }
 
 #[tokio::test]

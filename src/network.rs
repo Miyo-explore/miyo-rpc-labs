@@ -11,6 +11,7 @@
 pub static NETWORK_PASSPHRASES: &[(&str, &str)] = &[
     ("testnet", "Test SDF Network ; February 2023"),
     ("mainnet", "Public Global Stellar Network ; September 2015"),
+    ("futurenet", "Test SDF Future Network ; October 2022"),
 ];
 
 /// Look up the passphrase for a known network name (case-insensitive).
@@ -40,6 +41,10 @@ mod tests {
             network_passphrase("mainnet"),
             Some("Public Global Stellar Network ; September 2015")
         );
+        assert_eq!(
+            network_passphrase("futurenet"),
+            Some("Test SDF Future Network ; October 2022")
+        );
     }
 
     #[test]
@@ -51,6 +56,10 @@ mod tests {
         assert_eq!(
             network_passphrase("MainNet"),
             Some("Public Global Stellar Network ; September 2015")
+        );
+        assert_eq!(
+            network_passphrase("FutureNet"),
+            Some("Test SDF Future Network ; October 2022")
         );
     }
 
@@ -65,5 +74,6 @@ mod tests {
         let nets = known_networks();
         assert!(nets.contains(&"testnet"));
         assert!(nets.contains(&"mainnet"));
+        assert!(nets.contains(&"futurenet"));
     }
 }

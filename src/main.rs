@@ -150,13 +150,17 @@ fn run_check(args: CheckArgs) -> ExitCode {
     let runs = std::cmp::min(args.runs.max(1), 10) as usize;
 
     // Build the client config from the CLI flags. Defaults are preserved
-    // exactly when --user-agent / --max-response-bytes are absent.
+    // exactly when --user-agent / --max-response-bytes / --no-follow-redirects
+    // are absent.
     let mut client_config = RpcClientConfig::new(timeout);
     if let Some(ua) = &args.user_agent {
         client_config = client_config.with_user_agent(ua.clone());
     }
     if let Some(max) = args.max_response_bytes {
         client_config = client_config.with_max_response_bytes(max);
+    }
+    if args.no_follow_redirects {
+        client_config = client_config.with_follow_redirects(false);
     }
 
     let report = if arbitrary {
