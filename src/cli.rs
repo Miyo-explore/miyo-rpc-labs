@@ -77,7 +77,7 @@ pub struct CheckArgs {
     pub runs: u32,
 
     /// Validate the endpoint's `getNetwork` passphrase against a known
-    /// network (`testnet` or `mainnet`). A mismatch is reported as a FAIL.
+    /// network (`testnet`, `mainnet`, or `futurenet`). A mismatch is reported as a FAIL.
     #[arg(long, value_name = "NETWORK")]
     pub expected_network: Option<String>,
 
@@ -96,6 +96,12 @@ pub struct CheckArgs {
     /// Must be greater than zero.
     #[arg(long, value_name = "N")]
     pub max_response_bytes: Option<usize>,
+
+    /// Do not follow HTTP redirects (default: follow redirects).
+    /// When set, a 3xx response is reported in the check result instead
+    /// of being followed to a different host.
+    #[arg(long)]
+    pub no_follow_redirects: bool,
 }
 
 /// Arguments for the `batch` subcommand (multiple endpoints from a file).
