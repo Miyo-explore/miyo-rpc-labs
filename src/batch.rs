@@ -340,6 +340,7 @@ pub fn format_batch_human(report: &BatchReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
 
     #[test]
     fn test_parse_strips_blanks_and_comments() {
@@ -655,5 +656,84 @@ mod tests {
             !sanitized2.contains("REDACTED"),
             "non-sensitive params should not be redacted: {sanitized2}"
         );
+    }
+
+    // ────────────────────────
+    // #14: human output format
+    // ────────────────────────
+
+    /// `format_batch_human` renders a compact per-endpoint block (endpoint,
+    /// status, pass/fail counts) followed by an aggregate summary — and must
+    /// contain no JSON syntax.
+    #[test]
+    fn test_format_batch_human_content() {
+        let entries = vec![healthy_entry(), failed_entry(), invalid_entry()];
+        let report = BatchReport {
+            schema_version: SCHEMA_VERSION.to_string(),
+            tool_version: "0.1.0".to_string(),
+            runs: 1,
+            endpoints: entries.clone(),
+            summary: compute_summary(&entries),
+        };
+        let human = format_batch_human(&report);
+        assert!(
+            human.contains("https://a.com [PASS] 1 passed, 0 failed"),
+            "missing healthy line: {human}"
+        );
+        assert!(
+            human.contains("https://b.com [FAIL] 0 passed, 1 failed"),
+            "missing failed line: {human}"
+        );
+        assert!(
+            human.contains("garbage [INVALID] bad"),
+            "missing invalid line: {human}"
+        );
+        assert!(
+            human.contains(
+                "Summary: 3 total, 2 valid, 1 invalid, 1 healthy, 1 failed (exit code 1)"
+            ),
+            "missing aggregate summary: {human}"
+        );
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&human).is_err(),
+            "human output must not parse as JSON: {human}"
+        );
+        assert!(
+            !human.contains('{') && !human.contains('}'),
+            "human output must not contain JSON braces: {human}"
+        );
+    }
+
+    // ────────────────────────
+    // #15: batch timeout flag
+    // ────────────────────────
+
+    /// `batch` defaults to a 15-second timeout (same as `check`) and human
+    /// output; `--timeout-secs` overrides the timeout.
+    #[test]
+    fn test_batch_args_timeout_defaults() {
+        let cli = crate::Cli::try_parse_from(["miyo-rpc", "batch", "--file", "endpoints.txt"])
+            .expect("parse batch with defaults");
+        let args = match cli.command {
+            crate::Commands::Batch(args) => args,
+            _ => panic!("expected batch subcommand"),
+        };
+        assert_eq!(args.timeout_secs, 15);
+        assert_eq!(args.output, crate::OutputFormat::Human);
+
+        let cli = crate::Cli::try_parse_from([
+            "miyo-rpc",
+            "batch",
+            "--file",
+            "endpoints.txt",
+            "--timeout-secs",
+            "30",
+        ])
+        .expect("parse batch with --timeout-secs 30");
+        let args = match cli.command {
+            crate::Commands::Batch(args) => args,
+            _ => panic!("expected batch subcommand"),
+        };
+        assert_eq!(args.timeout_secs, 30);
     }
 }

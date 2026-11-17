@@ -2905,3 +2905,61 @@ async fn test_batch_429_classification_per_endpoint() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ────────────────────────────────
+// Batch per-endpoint timeout (#15)
+// ────────────────────────────────
+
+/// A server that accepts connections but never responds. The batch timeout
+/// must bound each endpoint's diagnosis: with `--timeout-secs 1` the run
+/// finishes after one timeout per check instead of hanging, and the failing
+/// checks report the configured timeout.
+#[tokio::test]
+async fn test_batch_timeout_applies_per_endpoint() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback");
+    let url = format!("http://{}", listener.local_addr().expect("addr"));
+    // Hold every accepted connection open forever without responding.
+    let server_task = tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((stream, _)) = listener.accept().await {
+            held.push(stream);
+        }
+    });
+
+    let mut path = std::env::temp_dir();
+    path.push("miyo_batch_timeout.txt");
+    std::fs::write(&path, format!("{url}\n")).unwrap();
+
+    let args = BatchArgs {
+        file: path.to_string_lossy().to_string(),
+        output: OutputFormat::Human,
+        timeout_secs: 1,
+        runs: 1,
+        method: Some("getHealth".to_string()),
+        concurrency: 1,
+        expected_network: None,
+    };
+    let started = std::time::Instant::now();
+    let report = miyo_rpc::run_batch(&args).await;
+    let elapsed = started.elapsed();
+    server_task.abort();
+    let _ = std::fs::remove_file(&path);
+
+    // Without the timeout reaching the client, reqwest has no deadline and
+    // this run would hang until the test harness kills it.
+    assert!(
+        elapsed < std::time::Duration::from_secs(15),
+        "batch run must be bounded by the timeout, took {elapsed:?}"
+    );
+    assert_eq!(report.summary.total, 1);
+    assert_eq!(report.summary.valid, 1);
+    assert_eq!(report.summary.failed, 1);
+    assert_eq!(report.summary.exit_code, 1);
+    let json = miyo_rpc::format_batch_json(&report).unwrap();
+    assert!(
+        json.contains("timed out after 1s"),
+        "failing checks must report the 1s timeout, got: {json}"
+    );
+}
