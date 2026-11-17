@@ -26,6 +26,19 @@ This project ships **two decoupled version numbers**:
 
 ## [Unreleased]
 
+### Added — Batch output (`--output human`) and per-endpoint timeout
+- `batch --output human` (the default) renders a compact per-endpoint block
+  (`<endpoint> [PASS|FAIL] <n> passed, <m> failed`, `[INVALID] <reason>` for
+  bad lines) followed by an aggregate `Summary:` line. The wiring
+  (`format_batch_human` + output branching in `main.rs`) already existed;
+  this closes the remaining gaps: content tests, CLI tests proving human
+  output is not JSON, and README documentation. JSON output is unchanged.
+- `batch --timeout-secs` (default 15, same as `check`) is now documented and
+  tested as a per-request timeout applied to every endpoint in the batch:
+  each HTTP request gets its own budget, so a slow endpoint fails its own
+  checks with a timeout instead of stalling the batch. The flag itself
+  already existed and was already threaded through to the client config.
+
 ### Added — RPC client flag (`--no-follow-redirects`) and `futurenet` network
 - `check --no-follow-redirects` disables following HTTP redirects (default
   stays follow). A 3xx response is reported in the check result (`HTTP 302: …`)
