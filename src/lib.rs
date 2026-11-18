@@ -27,7 +27,9 @@ pub use diagnostics::{
 };
 pub use error::{ErrorCategory, MiyoError, Result};
 pub use network::{known_networks, network_passphrase};
-pub use output::{format_human, format_json, sanitize_url};
+pub use output::{
+    colors_enabled, format_human, format_human_with_color, format_json, sanitize_url,
+};
 
 /// Schema version for machine-readable JSON reports. Bumped (major) when the
 /// JSON structure changes in a non-backwards-compatible way: a field is removed,

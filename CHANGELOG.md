@@ -26,6 +26,22 @@ This project ships **two decoupled version numbers**:
 
 ## [Unreleased]
 
+### Added — `NO_COLOR` support in human output
+- Human output (`--output human`, the default) no longer emits ANSI color
+  codes when the `NO_COLOR` environment variable is set to a non-empty
+  value (https://no-color.org), or when stdout is not a terminal (piped to
+  a file, captured by CI). Colors are unchanged on a TTY without
+  `NO_COLOR`. JSON output is unaffected and never contains ANSI codes.
+  New helpers: `colors_enabled()` and `format_human_with_color(report,
+  color)` in `src/output.rs`, covered by unit tests.
+
+### Fixed — Document `--params` / `--params-file` interaction with built-in methods
+- README flags table and the "Arbitrary Method Probing" section now state
+  that `--params` / `--params-file` only apply when `--method` names a
+  non-built-in method. When given without `--method` or with a built-in
+  method name, the params are ignored and the CLI prints the existing
+  stderr warning verbatim. No behavior changed; documentation only.
+
 ### Added — Batch output (`--output human`) and per-endpoint timeout
 - `batch --output human` (the default) renders a compact per-endpoint block
   (`<endpoint> [PASS|FAIL] <n> passed, <m> failed`, `[INVALID] <reason>` for

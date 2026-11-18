@@ -5,8 +5,36 @@
 //! - [`format_human`]: colored terminal output.
 //! - [`format_json`]: machine-readable JSON report.
 
-use crate::diagnostics::{DiagnosticReport, ReportSummary};
+use crate::diagnostics::{CheckStatus, DiagnosticReport, ReportSummary};
 use serde::Serialize;
+use std::io::IsTerminal;
+
+/// Whether ANSI color should be emitted in human output.
+///
+/// Color is disabled when the `NO_COLOR` environment variable is set to a
+/// non-empty value (https://no-color.org), or when stdout is not a terminal
+/// (output piped to a file, or captured by CI). JSON output never contains
+/// ANSI codes regardless of this setting.
+pub fn colors_enabled() -> bool {
+    !no_color_env_set() && std::io::stdout().is_terminal()
+}
+
+/// `true` when `NO_COLOR` is set to a non-empty value.
+///
+/// Per https://no-color.org, an empty value is treated as unset.
+fn no_color_env_set() -> bool {
+    std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty())
+}
+
+/// Wrap `text` in the given ANSI color code, or return it unchanged when
+/// `color` is `false`.
+fn colorize(text: &str, code: &str, color: bool) -> String {
+    if color {
+        format!("{code}{text}\x1b[0m")
+    } else {
+        text.to_string()
+    }
+}
 
 /// Keys in a URL query string that are treated as sensitive and redacted.
 ///
@@ -250,16 +278,30 @@ fn looks_like_secret(s: &str) -> bool {
 // ────────────────────────────────
 
 /// Human-readable formatting of a diagnostic report.
+///
+/// ANSI colors are emitted only when [`colors_enabled`] returns `true`
+/// (stdout is a terminal and `NO_COLOR` is unset or empty). See
+/// [`format_human_with_color`] for the deterministic variant used by tests.
 pub fn format_human(report: &DiagnosticReport) -> String {
+    format_human_with_color(report, colors_enabled())
+}
+
+/// Human-readable formatting of a diagnostic report with an explicit color
+/// switch.
+///
+/// `color = true` emits ANSI escape codes for PASS/FAIL/SKIP;
+/// `color = false` renders the same report as plain text. Use this in tests
+/// or when the caller already decided about color (e.g. piped output).
+pub fn format_human_with_color(report: &DiagnosticReport, color: bool) -> String {
     let mut out = String::new();
     out.push_str(&format!("Miyo RPC Labs v{}\n", report.tool_version));
     out.push_str(&format!("Endpoint: {}\n\n", report.endpoint));
 
     for check in &report.checks {
         let status_str = match check.status {
-            crate::diagnostics::CheckStatus::Pass => "\x1b[32mPASS\x1b[0m",
-            crate::diagnostics::CheckStatus::Fail => "\x1b[31mFAIL\x1b[0m",
-            crate::diagnostics::CheckStatus::Skip => "\x1b[33mSKIP\x1b[0m",
+            CheckStatus::Pass => colorize("PASS", "\x1b[32m", color),
+            CheckStatus::Fail => colorize("FAIL", "\x1b[31m", color),
+            CheckStatus::Skip => colorize("SKIP", "\x1b[33m", color),
         };
 
         let duration = check
@@ -364,4 +406,103 @@ pub fn format_json(report: &DiagnosticReport) -> Result<String, serde_json::Erro
     };
 
     serde_json::to_string_pretty(&j)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::diagnostics::{CheckResult, CheckStatus, DiagnosticReport, ReportSummary};
+    use std::sync::Mutex;
+
+    /// Serializes tests that mutate the process environment. `NO_COLOR`
+    /// is process-global, so two such tests racing would see each other's
+    /// value; the lock keeps the set/assert/remove sequence atomic.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn sample_report() -> DiagnosticReport {
+        let mk = |name: &str, status: CheckStatus| CheckResult {
+            name: name.to_string(),
+            status,
+            timestamp: "2026-11-18T00:00:00Z".to_string(),
+            duration_ms: Some(12),
+            http_status: Some(200),
+            endpoint: "https://example.invalid/rpc".to_string(),
+            details: None,
+            error: None,
+            error_message: None,
+            evidence: None,
+        };
+        DiagnosticReport {
+            tool_version: "0.1.0".to_string(),
+            endpoint: "https://example.invalid/rpc".to_string(),
+            runs: 1,
+            checks: vec![
+                mk("getHealth", CheckStatus::Pass),
+                mk("getNetwork", CheckStatus::Fail),
+                mk("getLatestLedger", CheckStatus::Skip),
+            ],
+            summary: ReportSummary {
+                ran: 2,
+                passed: 1,
+                failed: 1,
+                skipped: 1,
+                total_runs: 1,
+            },
+        }
+    }
+
+    #[test]
+    fn color_enabled_output_contains_ansi_codes() {
+        let out = format_human_with_color(&sample_report(), true);
+        assert!(out.contains("\x1b[32mPASS\x1b[0m"), "PASS should be green");
+        assert!(out.contains("\x1b[31mFAIL\x1b[0m"), "FAIL should be red");
+        assert!(out.contains("\x1b[33mSKIP\x1b[0m"), "SKIP should be yellow");
+    }
+
+    #[test]
+    fn color_disabled_output_has_no_ansi_codes() {
+        let out = format_human_with_color(&sample_report(), false);
+        assert!(
+            !out.contains("\x1b["),
+            "plain output must not contain ANSI codes"
+        );
+        assert!(out.contains("PASS"), "status text is still present");
+        assert!(out.contains("FAIL"), "status text is still present");
+        assert!(out.contains("SKIP"), "status text is still present");
+    }
+
+    #[test]
+    fn no_color_env_var_is_respected() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        // Any non-empty value disables color.
+        std::env::set_var("NO_COLOR", "1");
+        assert!(no_color_env_set(), "NO_COLOR=1 should be detected");
+        assert!(
+            !colors_enabled(),
+            "NO_COLOR=1 must disable color even on a TTY"
+        );
+        // An empty value is treated as unset (https://no-color.org).
+        std::env::set_var("NO_COLOR", "");
+        assert!(!no_color_env_set(), "empty NO_COLOR should be ignored");
+        std::env::remove_var("NO_COLOR");
+        assert!(!no_color_env_set(), "unset NO_COLOR should be ignored");
+    }
+
+    #[test]
+    fn json_output_never_contains_ansi_codes() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let json = format_json(&sample_report()).expect("JSON serialization");
+        assert!(
+            !json.contains("\x1b["),
+            "JSON must never contain ANSI codes"
+        );
+        // Same when NO_COLOR is set: JSON output is unaffected either way.
+        std::env::set_var("NO_COLOR", "1");
+        let json = format_json(&sample_report()).expect("JSON serialization");
+        assert!(
+            !json.contains("\x1b["),
+            "JSON must never contain ANSI codes"
+        );
+        std::env::remove_var("NO_COLOR");
+    }
 }

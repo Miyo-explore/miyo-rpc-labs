@@ -167,11 +167,11 @@ miyo-rpc check --help
 | Flag               | Short | Default   | Notes                                                                 |
 |--------------------|-------|-----------|-----------------------------------------------------------------------|
 | `--url <URL>`      | `-u`  | _required_ | The Stellar JSON-RPC endpoint URL to diagnose.                       |
-| `--output <FMT>`   | `-o`  | `human`   | `human` (colored terminal) or `json`.                                |
+| `--output <FMT>`   | `-o`  | `human`   | `human` (colored terminal) or `json`. Colors are off when `NO_COLOR` is set to a non-empty value or stdout is not a terminal. |
 | `--timeout-secs`   | `-t`  | `15`      | Maximum time to wait per HTTP request.                               |
 | `--method <NAME>`  | `-m`  | _(none)_  | Run only the named JSON-RPC method. For a built-in check (`getHealth`, `getNetwork`, `getLatestLedger`, `getVersionInfo`) the enriched check runs; for any other name a single arbitrary-method probe runs with `--params`. The HTTP connectivity check (`httpConnectivity`) always runs regardless of this flag. |
-| `--params <JSON>`  |       | _(none)_  | JSON-RPC `params` for an arbitrary-method probe: a JSON object, array, or `null`. Must be valid JSON, or the CLI exits `2` before any request is sent. Raw params are never echoed in output. |
-| `--params-file <FILE>` |  | _(none)_ | Read JSON-RPC `params` from a file (same JSON rules as `--params`). |
+| `--params <JSON>`  |       | _(none)_  | JSON-RPC `params` for an arbitrary-method probe: a JSON object, array, or `null`. Must be valid JSON, or the CLI exits `2` before any request is sent. Raw params are never echoed in output. Only applies when `--method` names a non-built-in method; otherwise the params are ignored (warning on stderr). |
+| `--params-file <FILE>` |  | _(none)_ | Read JSON-RPC `params` from a file (same JSON rules as `--params`). Only applies when `--method` names a non-built-in method; otherwise the params are ignored (warning on stderr). |
 | `--runs <N>`       | `-n`  | `1`       | Number of diagnostic runs to perform. Clamped to the range `[1, 10]` by the CLI. |
 | `--expected-network <NAME>` | _(none)_ | Validate the endpoint's `getNetwork` passphrase against `testnet`, `mainnet`, or `futurenet`. A mismatch is reported as FAIL (exit code 1). |
 | `--compare <URL>`      | _(none)_ | Compare the primary endpoint's `getNetwork` passport + `getLatestLedger` sequence/hash against a second endpoint `<URL>`. Divergences are appended as `evidence` (informational; exit code unchanged). |
@@ -193,6 +193,12 @@ miyo-rpc check --help
 > reuses the same client settings (same `User-Agent`, same response cap,
 > same redirect policy). They do not affect `batch`, which keeps the
 > defaults.
+
+> **Human output colors:** PASS/FAIL/SKIP are colored only when stdout is a
+> terminal. Set `NO_COLOR` to any non-empty value to disable colors
+> (https://no-color.org) — useful when piping output to a file or a CI log.
+> An empty `NO_COLOR` is treated as unset. JSON output never contains ANSI
+> codes.
 
 ### Exit codes
 
@@ -280,6 +286,13 @@ miyo-rpc check --url https://soroban-testnet.stellar.org \
   server-echoed secret is hidden from the report — treat the report as sensitive.
 - In arbitrary mode `--expected-network` and `--compare` have nothing to act on;
   the CLI prints a warning and does not run extra checks implicitly.
+- `--params` / `--params-file` are ignored when `--method` is omitted or
+  names a built-in method, because built-in checks take no params. The CLI
+  prints a warning to stderr in that case:
+  `warning: --params/--params-file is ignored: --method does not name an
+  arbitrary method (built-in checks take no params).` The params are not
+  applied to any check; to use them, name a non-built-in method with
+  `--method`.
 - `--runs` aggregates repeated probes with worst-status-wins (a single `Fail`
   across runs is never hidden by a `Pass`).
 
