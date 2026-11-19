@@ -107,6 +107,13 @@ benchmarking) are documented in the README "Limitations" section.
 | Error classification (`IssueCategory`) | Implemented | `src/error.rs:13` |
 | Deterministic test suite (mockito) | Implemented | `tests/diagnostics.rs`, `Cargo.toml:33` |
 | CI (fmt, clippy, test) | Implemented | `.github/workflows/ci.yml` |
+| Arbitrary JSON-RPC method probing (`--method` + `--params` / `--params-file`) | Implemented | `src/diagnostics.rs`, `src/cli.rs` |
+| HTTP 429 classified as `rate_limited` (+ `Retry-After` in `details`) | Implemented | `src/error.rs`, `src/diagnostics.rs` |
+| `--user-agent` override + `--max-response-bytes` cap (`check`-only) | Implemented | `src/cli.rs`, `src/diagnostics.rs` |
+| `--no-follow-redirects` (`check`-only; `httpConnectivity` still follows) | Implemented | `src/cli.rs`, `src/diagnostics.rs` |
+| `futurenet` known network for `--expected-network` | Implemented | `src/network.rs` |
+| `batch --output human` + per-endpoint timeout (docs + tests) | Implemented | `src/output.rs`, `src/main.rs` |
+| `NO_COLOR` + non-TTY color gating in human output | Implemented | `src/output.rs` |
 
 ### Gaps (historical, resolved in v0.1.0)
 
