@@ -26,6 +26,8 @@ This project ships **two decoupled version numbers**:
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-19
+
 ### Added — `NO_COLOR` support in human output
 - Human output (`--output human`, the default) no longer emits ANSI color
   codes when the `NO_COLOR` environment variable is set to a non-empty
