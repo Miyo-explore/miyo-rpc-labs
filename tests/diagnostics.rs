@@ -408,22 +408,48 @@ async fn test_report_all_success() {
         })))
         .create();
 
+    // Mock getEvents. The check first resolves startLedger via
+    // getLatestLedger (reusing the mock above, which returns the sequence
+    // as a number); the string form is covered by the dedicated test.
+    server
+        .mock("POST", "/")
+        .match_body(mockito::Matcher::Regex(
+            r#""method":"getEvents""#.to_string(),
+        ))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(json_body(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "events": [
+                    {"type": "contract", "ledger": "2002985", "ledgerClosedAt": "1765223032", "contractId": "CDLZUD4T7B6R2P2L2Y2Y2Y2Y2Y2Y2Y2Y2Y2Y2Y2Y2Y2Y2Y2Y2Y2", "topic": ["transfer"], "value": "AAAAAQ=="},
+                    {"type": "system", "ledger": "2002985", "ledgerClosedAt": "1765223032", "topic": [], "value": "AAAAAQ=="}
+                ],
+                "latestLedger": 2002985,
+                "oldestLedger": 2002900,
+                "cursor": "2002985-0000000001"
+            }
+        })))
+        .create();
+
     let report = DiagnosticReport::run_all(&url, Duration::from_secs(5), None, 1).await;
 
-    // Should have httpConnectivity + 4 method checks = 5 total
-    assert_eq!(report.checks.len(), 5);
+    // Should have httpConnectivity + 5 method checks = 6 total
+    assert_eq!(report.checks.len(), 6);
 
     // HTTP connectivity should pass (200)
     let http_check = report.checks.iter().find(|c| c.name == "httpConnectivity");
     assert!(http_check.is_some());
     assert_eq!(http_check.unwrap().status, CheckStatus::Pass);
 
-    // All 4 RPC method checks should pass
+    // All 5 RPC method checks should pass
     for name in [
         "getHealth",
         "getNetwork",
         "getLatestLedger",
         "getVersionInfo",
+        "getEvents",
     ] {
         let check = report.checks.iter().find(|c| c.name == name);
         assert!(check.is_some(), "should have check for {name}");
@@ -434,7 +460,17 @@ async fn test_report_all_success() {
         );
     }
 
-    assert_eq!(report.summary.passed, 5);
+    // getEvents resolved startLedger from getLatestLedger and reported the page.
+    let events_check = find_check(&report, "getEvents");
+    let details = events_check
+        .details
+        .as_ref()
+        .expect("getEvents should carry details");
+    assert_eq!(details.get("start_ledger"), Some(&Value::from(2002985u64)));
+    assert_eq!(details.get("events_returned"), Some(&Value::from(2u64)));
+    assert_eq!(details.get("has_cursor"), Some(&Value::Bool(true)));
+
+    assert_eq!(report.summary.passed, 6);
     assert_eq!(report.summary.failed, 0);
 }
 
@@ -447,7 +483,8 @@ async fn test_report_all_json_rpc_errors() {
     server
         .mock("POST", "/")
         .match_body(mockito::Matcher::Regex(
-            r#""method":"(getHealth|getNetwork|getLatestLedger|getVersionInfo)""#.to_string(),
+            r#""method":"(getHealth|getNetwork|getLatestLedger|getVersionInfo|getEvents)""#
+                .to_string(),
         ))
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -463,18 +500,19 @@ async fn test_report_all_json_rpc_errors() {
 
     let report = DiagnosticReport::run_all(&url, Duration::from_secs(5), None, 1).await;
 
-    // 4 RPC method checks should all be Fail
+    // 5 RPC method checks should all be Fail (getEvents fails too: its
+    // internal getLatestLedger call hits the same -32601 mock).
     let rpc_checks: Vec<_> = report
         .checks
         .iter()
         .filter(|c| c.name != "httpConnectivity")
         .collect();
-    assert_eq!(rpc_checks.len(), 4);
+    assert_eq!(rpc_checks.len(), 5);
     for c in &rpc_checks {
         assert_eq!(c.status, CheckStatus::Fail, "{} should fail", c.name);
     }
 
-    assert_eq!(report.summary.failed, 5);
+    assert_eq!(report.summary.failed, 6);
 }
 
 /// Test method filter (--method).
@@ -2674,12 +2712,18 @@ async fn test_builtin_method_filter_unchanged() {
         "getNetwork",
         "getLatestLedger",
         "getVersionInfo",
+        "getEvents",
     ] {
         assert!(names.contains(&builtin), "{builtin} should remain present");
     }
     assert!(names.contains(&"httpConnectivity"));
     assert_eq!(find_check(&report, "getHealth").status, CheckStatus::Pass);
-    for other in ["getNetwork", "getLatestLedger", "getVersionInfo"] {
+    for other in [
+        "getNetwork",
+        "getLatestLedger",
+        "getVersionInfo",
+        "getEvents",
+    ] {
         assert_eq!(
             find_check(&report, other).status,
             CheckStatus::Skip,
@@ -2691,8 +2735,9 @@ async fn test_builtin_method_filter_unchanged() {
 #[test]
 fn test_is_builtin_method_public() {
     assert!(miyo_rpc::is_builtin_method("getHealth"));
+    assert!(miyo_rpc::is_builtin_method("getEvents"));
     assert!(!miyo_rpc::is_builtin_method("getLedgerEntries"));
-    assert_eq!(miyo_rpc::BUILTIN_METHODS.len(), 4);
+    assert_eq!(miyo_rpc::BUILTIN_METHODS.len(), 5);
 }
 
 #[test]
@@ -2702,6 +2747,260 @@ fn test_validate_params_public() {
     assert!(miyo_rpc::validate_params("null").unwrap().is_none());
     assert!(miyo_rpc::validate_params("42").is_err());
     assert!(miyo_rpc::validate_params("nope").is_err());
+}
+
+// ────────────────────────────
+// getEvents built-in check
+// ────────────────────────────
+
+/// Mock a `getLatestLedger` success returning `sequence` as the given JSON
+/// value (string or number — the wire format varies by response).
+fn mock_latest_ledger(server: &mut mockito::Server, sequence: Value) {
+    server
+        .mock("POST", "/")
+        .match_body(mockito::Matcher::Regex(
+            r#""method":"getLatestLedger""#.to_string(),
+        ))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(json_body(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "id": "9f3308826b666c11df41693b17eddbb68aea9758be0f67fd5df81f6cf5c48984",
+                "sequence": sequence,
+                "closeTime": "1765223032"
+            }
+        })))
+        .create();
+}
+
+/// Mock a `getEvents` success returning the given `result` object.
+fn mock_get_events_result(server: &mut mockito::Server, result: Value) {
+    server
+        .mock("POST", "/")
+        .match_body(mockito::Matcher::Regex(
+            r#""method":"getEvents""#.to_string(),
+        ))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(json_body(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": result
+        })))
+        .create();
+}
+
+/// The check resolves `startLedger` from `getLatestLedger` (string form)
+/// and sends exactly `{"startLedger": <seq>, "pagination": {"limit": 10}}`
+/// — no filters, no cursor input. The exact-body matcher proves the
+/// request shape, including the absence of a `filters` key.
+#[tokio::test]
+async fn test_get_events_request_params_from_latest_ledger() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+
+    server
+        .mock("GET", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("{}")
+        .create();
+
+    mock_latest_ledger(&mut server, json!("2002985"));
+
+    server
+        .mock("POST", "/")
+        .match_body(mockito::Matcher::Json(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getEvents",
+            "params": {"startLedger": 2002985, "pagination": {"limit": 10}}
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(json_body(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "events": [
+                    {"type": "contract", "ledger": "2002985", "ledgerClosedAt": "1765223032", "contractId": "CDLZUD4T7B6R2P2L2Y2Y2Y2Y2Y2Y2Y2Y2Y2Y2Y2Y2Y2Y2Y2Y2Y2", "topic": ["transfer"], "value": "AAAAAQ=="},
+                    {"type": "system", "ledger": "2002985", "ledgerClosedAt": "1765223032", "topic": [], "value": "AAAAAQ=="}
+                ],
+                "latestLedger": 2002985,
+                "oldestLedger": 2002900,
+                "cursor": "2002985-0000000001"
+            }
+        })))
+        .create();
+
+    let report =
+        DiagnosticReport::run_all(&url, Duration::from_secs(5), Some("getEvents"), 1).await;
+
+    let check = find_check(&report, "getEvents");
+    assert_eq!(check.status, CheckStatus::Pass);
+    let details = check.details.as_ref().expect("getEvents details");
+    assert_eq!(details.get("start_ledger"), Some(&Value::from(2002985u64)));
+    assert_eq!(details.get("events_returned"), Some(&Value::from(2u64)));
+    assert_eq!(details.get("latest_ledger"), Some(&Value::from(2002985u64)));
+    assert_eq!(details.get("has_cursor"), Some(&Value::Bool(true)));
+    // The filter leaves the other built-ins skipped, not omitted.
+    assert_eq!(report.summary.passed, 2); // httpConnectivity + getEvents
+    assert_eq!(report.summary.skipped, 4);
+}
+
+/// An empty page is still a Pass: the method works, the latest ledger
+/// simply emitted no events. No cursor is returned for an empty page.
+#[tokio::test]
+async fn test_get_events_empty_page_passes() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+
+    server
+        .mock("GET", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("{}")
+        .create();
+
+    mock_latest_ledger(&mut server, json!(2002985));
+    mock_get_events_result(
+        &mut server,
+        json!({
+            "events": [],
+            "latestLedger": 2002985,
+            "oldestLedger": 2002900
+        }),
+    );
+
+    let report =
+        DiagnosticReport::run_all(&url, Duration::from_secs(5), Some("getEvents"), 1).await;
+
+    let check = find_check(&report, "getEvents");
+    assert_eq!(check.status, CheckStatus::Pass);
+    let details = check.details.as_ref().expect("getEvents details");
+    assert_eq!(details.get("events_returned"), Some(&Value::from(0u64)));
+    assert_eq!(details.get("has_cursor"), Some(&Value::Bool(false)));
+}
+
+/// When `getLatestLedger` fails, `getEvents` cannot resolve a startLedger
+/// and must Fail (not silently probe with a guessed ledger).
+#[tokio::test]
+async fn test_get_events_fails_when_latest_ledger_fails() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+
+    server
+        .mock("GET", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("{}")
+        .create();
+
+    server
+        .mock("POST", "/")
+        .match_body(mockito::Matcher::Regex(
+            r#""method":"getLatestLedger""#.to_string(),
+        ))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(json_body(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "error": {"code": -32603, "message": "Internal error"}
+        })))
+        .create();
+
+    let report =
+        DiagnosticReport::run_all(&url, Duration::from_secs(5), Some("getEvents"), 1).await;
+
+    let check = find_check(&report, "getEvents");
+    assert_eq!(check.status, CheckStatus::Fail);
+    assert_eq!(
+        check.error,
+        Some(miyo_rpc::IssueCategory::JsonRpcError),
+        "underlying getLatestLedger JSON-RPC error must surface"
+    );
+    let evidence = check.evidence.as_deref().unwrap_or("");
+    assert!(
+        evidence.contains("getLatestLedger"),
+        "evidence must name the failed dependency: {evidence}"
+    );
+}
+
+/// A `getEvents` result without an `events` array is malformed, not a Pass.
+#[tokio::test]
+async fn test_get_events_missing_events_array_fails() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+
+    server
+        .mock("GET", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("{}")
+        .create();
+
+    mock_latest_ledger(&mut server, json!(2002985));
+    mock_get_events_result(&mut server, json!({"latestLedger": 2002985}));
+
+    let report =
+        DiagnosticReport::run_all(&url, Duration::from_secs(5), Some("getEvents"), 1).await;
+
+    let check = find_check(&report, "getEvents");
+    assert_eq!(check.status, CheckStatus::Fail);
+    assert_eq!(
+        check.error,
+        Some(miyo_rpc::IssueCategory::MalformedResponse),
+        "missing 'events' array must classify as MalformedResponse"
+    );
+    let message = check.error_message.as_deref().unwrap_or("");
+    assert!(
+        message.contains("events"),
+        "error message must name the missing field: {message}"
+    );
+}
+
+/// A JSON-RPC error from `getEvents` itself (e.g. invalid params) is a Fail
+/// with the server's error classification preserved.
+#[tokio::test]
+async fn test_get_events_json_rpc_error_fails() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+
+    server
+        .mock("GET", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("{}")
+        .create();
+
+    mock_latest_ledger(&mut server, json!(2002985));
+    server
+        .mock("POST", "/")
+        .match_body(mockito::Matcher::Regex(
+            r#""method":"getEvents""#.to_string(),
+        ))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(json_body(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "error": {"code": -32602, "message": "Invalid params"}
+        })))
+        .create();
+
+    let report =
+        DiagnosticReport::run_all(&url, Duration::from_secs(5), Some("getEvents"), 1).await;
+
+    let check = find_check(&report, "getEvents");
+    assert_eq!(check.status, CheckStatus::Fail);
+    assert_eq!(
+        check.error,
+        Some(miyo_rpc::IssueCategory::JsonRpcError),
+        "getEvents JSON-RPC error must classify as JsonRpcError"
+    );
 }
 
 // ────────────────────────────

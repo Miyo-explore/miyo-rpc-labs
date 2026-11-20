@@ -227,6 +227,165 @@ impl RpcCheck for SimpleMethodCheck {
     }
 }
 
+/// Maximum number of events fetched per page by the built-in `getEvents`
+/// check. The Stellar RPC limit is 1–10000 (default 100); 10 keeps the
+/// diagnostic response small — a check proves the method works, it does not
+/// stream history.
+pub const GET_EVENTS_PAGE_LIMIT: u64 = 10;
+
+/// Parse a ledger sequence out of a `getLatestLedger` result.
+///
+/// Stellar RPC serializes the sequence as a JSON string in some responses
+/// and as a number in others; accept both, and reject anything else
+/// (missing field, wrong type, unparseable string).
+fn parse_ledger_sequence(result: &Value) -> Option<u64> {
+    match result.get("sequence") {
+        Some(Value::String(s)) => s.parse::<u64>().ok(),
+        Some(Value::Number(n)) => n.as_u64(),
+        _ => None,
+    }
+}
+
+/// A built-in check for the Stellar RPC `getEvents` method.
+///
+/// Unlike the no-parameter checks, `getEvents` requires a `startLedger`
+/// inside the endpoint's retention window, so the check first asks
+/// `getLatestLedger` for the latest sequence and then requests a single
+/// page (`pagination.limit` = [`GET_EVENTS_PAGE_LIMIT`], no filters — all
+/// event types, all contracts) starting at that ledger. The response
+/// `cursor` is reported as `has_cursor` (a continuation page exists) but
+/// is never followed: a diagnostics check fetches one page, it does not
+/// stream events. No user-supplied params are involved — `--params` is
+/// still ignored for built-in methods.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GetEventsCheck;
+
+impl RpcCheck for GetEventsCheck {
+    fn name(&self) -> &str {
+        "getEvents"
+    }
+
+    fn run<'a>(
+        &'a self,
+        client: &'a RpcClient,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = CheckResult> + Send + 'a>> {
+        Box::pin(async move {
+            let endpoint = client.sanitized_url();
+            let timestamp = chrono::Utc::now().to_rfc3339();
+            let method = "getEvents";
+
+            // 1. Resolve startLedger from getLatestLedger: the request is
+            // rejected when startLedger is outside the retained window, so
+            // a hardcoded ledger would rot. The latest ledger is always in
+            // range (startLedger is inclusive).
+            let sequence = match client.call::<Value>("getLatestLedger", None).await {
+                Ok((_, result)) => match parse_ledger_sequence(&result) {
+                    Some(seq) => seq,
+                    None => {
+                        return fail_result(
+                            method,
+                            &endpoint,
+                            timestamp,
+                            &MiyoError::MalformedStructure(
+                                "getLatestLedger result has no usable 'sequence' field".to_string(),
+                            ),
+                            "Call getLatestLedger to resolve the startLedger for getEvents."
+                                .to_string(),
+                        );
+                    }
+                },
+                Err(e) => {
+                    return fail_result(
+                        method,
+                        &endpoint,
+                        timestamp,
+                        &e,
+                        "Call getLatestLedger to resolve the startLedger for getEvents before calling getEvents."
+                            .to_string(),
+                    );
+                }
+            };
+
+            // 2. Fetch one page of events starting at the latest ledger.
+            let params = serde_json::json!({
+                "startLedger": sequence,
+                "pagination": { "limit": GET_EVENTS_PAGE_LIMIT },
+            });
+            let evidence = format!(
+                "Sent JSON-RPC 2.0 POST to {endpoint} with method 'getEvents' and params {{startLedger: {sequence}, pagination: {{limit: {GET_EVENTS_PAGE_LIMIT}}}}} (startLedger resolved from getLatestLedger; no filters)."
+            );
+            match client.call::<Value>(method, Some(params)).await {
+                Ok((info, result)) => {
+                    let events = match result.get("events").and_then(Value::as_array) {
+                        Some(events) => events,
+                        None => {
+                            return fail_result(
+                                method,
+                                &endpoint,
+                                timestamp,
+                                &MiyoError::MalformedStructure(
+                                    "getEvents result has no 'events' array".to_string(),
+                                ),
+                                evidence,
+                            );
+                        }
+                    };
+                    let duration_ms = info.duration.as_millis() as u64;
+                    let mut details = serde_json::Map::new();
+                    details.insert(
+                        "description".to_string(),
+                        Value::String(
+                            "Contract events in the latest ledger (one page, no filters)."
+                                .to_string(),
+                        ),
+                    );
+                    details.insert(
+                        "http_status".to_string(),
+                        Value::Number(serde_json::Number::from(info.status)),
+                    );
+                    details.insert(
+                        "start_ledger".to_string(),
+                        Value::Number(serde_json::Number::from(sequence)),
+                    );
+                    details.insert(
+                        "events_returned".to_string(),
+                        Value::Number(serde_json::Number::from(events.len())),
+                    );
+                    if let Some(v) = result.get("latestLedger") {
+                        details.insert("latest_ledger".to_string(), v.clone());
+                    }
+                    if let Some(v) = result.get("oldestLedger") {
+                        details.insert("oldest_ledger".to_string(), v.clone());
+                    }
+                    details.insert(
+                        "has_cursor".to_string(),
+                        Value::Bool(
+                            result
+                                .get("cursor")
+                                .and_then(Value::as_str)
+                                .is_some_and(|c| !c.is_empty()),
+                        ),
+                    );
+
+                    CheckResult {
+                        name: method.to_string(),
+                        status: CheckStatus::Pass,
+                        timestamp,
+                        duration_ms: Some(duration_ms),
+                        http_status: Some(info.status),
+                        endpoint: endpoint.clone(),
+                        details: Some(details),
+                        error: None,
+                        error_message: None,
+                        evidence: Some(evidence),
+                    }
+                }
+                Err(e) => fail_result(method, &endpoint, timestamp, &e, evidence),
+            }
+        })
+    }
+}
+
 /// Check raw HTTP connectivity and status code — independent of JSON-RPC.
 pub async fn http_connectivity_check(
     url: &str,
@@ -358,28 +517,33 @@ fn fail_result(
 }
 
 /// All built-in checks that the `check` command runs by default.
-pub fn all_checks() -> Vec<SimpleMethodCheck> {
+///
+/// Four are no-parameter method checks; `getEvents` derives its own
+/// `startLedger` from `getLatestLedger` and fetches one page (see
+/// [`GetEventsCheck`]).
+pub fn all_checks() -> Vec<Box<dyn RpcCheck + Send + Sync>> {
     vec![
-        SimpleMethodCheck {
+        Box::new(SimpleMethodCheck {
             method_name: "getHealth",
             description: "Node health status and ledger window bounds.",
             primary_field: Some("status"),
-        },
-        SimpleMethodCheck {
+        }),
+        Box::new(SimpleMethodCheck {
             method_name: "getNetwork",
             description: "Network passphrase and protocol version.",
             primary_field: Some("passphrase"),
-        },
-        SimpleMethodCheck {
+        }),
+        Box::new(SimpleMethodCheck {
             method_name: "getLatestLedger",
             description: "Latest known ledger sequence, hash, and close time.",
             primary_field: Some("sequence"),
-        },
-        SimpleMethodCheck {
+        }),
+        Box::new(SimpleMethodCheck {
             method_name: "getVersionInfo",
             description: "RPC server version and Captive Core version.",
             primary_field: Some("version"),
-        },
+        }),
+        Box::new(GetEventsCheck),
     ]
 }
 
@@ -389,6 +553,7 @@ pub const BUILTIN_METHODS: &[&str] = &[
     "getNetwork",
     "getLatestLedger",
     "getVersionInfo",
+    "getEvents",
 ];
 
 /// Whether `name` refers to one of the built-in checks ([`BUILTIN_METHODS`]).
@@ -573,7 +738,7 @@ impl DiagnosticReport {
                     .iter()
                     .map(|c| {
                         fail_result(
-                            c.method_name,
+                            c.name(),
                             &endpoint,
                             timestamp.clone(),
                             &e,
@@ -607,9 +772,9 @@ impl DiagnosticReport {
             let checks = all_checks();
             for check in &checks {
                 if let Some(m) = method_filter {
-                    if m != check.method_name {
+                    if m != check.name() {
                         run_results.push(CheckResult {
-                            name: check.method_name.to_string(),
+                            name: check.name().to_string(),
                             status: CheckStatus::Skip,
                             timestamp: chrono::Utc::now().to_rfc3339(),
                             duration_ms: None,
@@ -1481,5 +1646,53 @@ mod tests {
         );
         assert!(dbg.contains("getSecret"), "Debug output: {dbg}");
         assert!(dbg.contains("<redacted>"), "Debug output: {dbg}");
+    }
+
+    #[test]
+    fn test_parse_ledger_sequence_string_and_number() {
+        // Stellar RPC serializes the sequence as a string in some responses
+        // and as a number in others — both must resolve.
+        assert_eq!(
+            parse_ledger_sequence(&serde_json::json!({"sequence": "2002985"})),
+            Some(2002985)
+        );
+        assert_eq!(
+            parse_ledger_sequence(&serde_json::json!({"sequence": 2002985})),
+            Some(2002985)
+        );
+        // Missing, wrong-typed, or unparseable sequences are rejected.
+        assert_eq!(parse_ledger_sequence(&serde_json::json!({})), None);
+        assert_eq!(
+            parse_ledger_sequence(&serde_json::json!({"sequence": true})),
+            None
+        );
+        assert_eq!(
+            parse_ledger_sequence(&serde_json::json!({"sequence": "not-a-number"})),
+            None
+        );
+        assert_eq!(
+            parse_ledger_sequence(&serde_json::json!({"sequence": -1})),
+            None
+        );
+    }
+
+    #[test]
+    fn test_get_events_check_name_and_page_limit() {
+        assert_eq!(GetEventsCheck.name(), "getEvents");
+        assert_eq!(GET_EVENTS_PAGE_LIMIT, 10);
+        assert!(is_builtin_method("getEvents"));
+        assert_eq!(BUILTIN_METHODS.len(), 5);
+        let checks = all_checks();
+        let names: Vec<&str> = checks.iter().map(|c| c.name()).collect();
+        assert_eq!(
+            names,
+            [
+                "getHealth",
+                "getNetwork",
+                "getLatestLedger",
+                "getVersionInfo",
+                "getEvents"
+            ]
+        );
     }
 }
