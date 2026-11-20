@@ -49,7 +49,7 @@ v0.1.0 resolves the original roadmap gaps: network-identity validation
 (`--expected-network`), cross-run ledger progression (`--runs`), `--compare`
 for cross-endpoint divergence, machine-readable `schema_version` (`"1.0"`),
 URL sanitization, and a CI + release workflow now ship. By-design scope limits
-for the current release (plain-`GET` connectivity semantics, only four built-in
+for the current release (plain-`GET` connectivity semantics, only five built-in
 JSON-RPC methods, no provider-specific error taxonomy, no sustained
 benchmarking) are documented in the README "Limitations" section.
 
@@ -91,12 +91,12 @@ benchmarking) are documented in the README "Limitations" section.
 
 ## 4. Current State and Gap Analysis
 
-### What exists today (verified in `main` @ 441c1b0 — tag `v0.2.0`)
+### What exists today (verified in `main` @ 28523d8 — PR #28 merged; latest release still `v0.2.0`)
 
 | Capability | Status | Evidence |
 |------------|--------|----------|
 | HTTP connectivity check | Implemented | `src/diagnostics.rs:227` |
-| `getHealth`, `getNetwork`, `getLatestLedger`, `getVersionInfo` method checks | Implemented | `src/diagnostics.rs:339` |
+| `getHealth`, `getNetwork`, `getLatestLedger`, `getVersionInfo`, `getEvents` method checks | Implemented | `src/diagnostics.rs:524` |
 | Worst-status aggregation (`Fail > Skip > Pass`) | Implemented | `src/diagnostics.rs:34` |
 | Repeated runs (`--runs`, clamped `[1, 10]`) | Implemented | `src/cli.rs:64`, `src/diagnostics.rs:414` |
 | Latency statistics (min/avg/max/run_count) | Implemented | `src/diagnostics.rs:516-532` |
