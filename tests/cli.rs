@@ -309,6 +309,62 @@ fn test_check_no_follow_redirects_reports_302() {
     );
 }
 
+/// Local mock server answering a healthy getEvents flow (GET +
+/// getLatestLedger + getEvents). The latest ledger emits no events, which
+/// is still a Pass. Loopback only; no live endpoint is contacted.
+fn get_events_mock_server() -> mockito::ServerGuard {
+    let mut server = mockito::Server::new();
+    server.mock("GET", "/").with_status(200).create();
+    server
+        .mock("POST", "/")
+        .match_body(mockito::Matcher::Regex(
+            r#""method":"getLatestLedger""#.to_string(),
+        ))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"jsonrpc":"2.0","id":1,"result":{"id":"abc","sequence":"2002985","closeTime":"1765223032"}}"#)
+        .create();
+    server
+        .mock("POST", "/")
+        .match_body(mockito::Matcher::Regex(
+            r#""method":"getEvents""#.to_string(),
+        ))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"jsonrpc":"2.0","id":1,"result":{"events":[],"latestLedger":2002985,"oldestLedger":2002900}}"#)
+        .create();
+    server
+}
+
+#[test]
+fn test_check_method_get_events() {
+    let server = get_events_mock_server();
+    let url = server.url();
+    let output = Command::new(BIN)
+        .args(["check", "--url", &url, "--method", "getEvents"])
+        .output()
+        .expect("failed to execute miyo-rpc check");
+    assert!(
+        output.status.success(),
+        "getEvents check should pass, got exit {:?}: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("getEvents"),
+        "output should name the getEvents check, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("PASS"),
+        "output should show PASS, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("events_returned: 0"),
+        "output should report the empty page, got: {stdout}"
+    );
+}
+
 /// Local mock server answering a healthy getHealth (GET + POST).
 /// Used for batch output-format tests (loopback only; no live endpoint
 /// is contacted).

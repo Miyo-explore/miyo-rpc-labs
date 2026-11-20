@@ -26,6 +26,22 @@ This project ships **two decoupled version numbers**:
 
 ## [Unreleased]
 
+### Added — Built-in `getEvents` check
+- `check` now runs a fifth built-in check, `getEvents`, in addition to
+  `getHealth`, `getNetwork`, `getLatestLedger`, and `getVersionInfo`
+  (plus `httpConnectivity`). `--method getEvents` runs it in isolation.
+- `getEvents` requires a `startLedger` inside the endpoint's retention
+  window, so the check resolves it from `getLatestLedger` first (the
+  latest ledger, always in range) and then requests a single page
+  (`pagination.limit` 10, no filters — all event types, all contracts).
+  The response `cursor` is reported as `has_cursor` but never followed.
+  Details carry `start_ledger`, `events_returned`, `latest_ledger`,
+  `oldest_ledger`, and `has_cursor`; an empty page is a Pass. If
+  `getLatestLedger` fails, `getEvents` fails instead of probing with a
+  guessed ledger. Covered by mockito tests (request shape, string/number
+  sequence, empty page, dependency failure, malformed result, JSON-RPC
+  error) and a CLI end-to-end test. No new dependencies; read-only.
+
 ## [0.2.0] - 2026-11-19
 
 ### Added — `NO_COLOR` support in human output
