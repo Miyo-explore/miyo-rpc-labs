@@ -91,7 +91,7 @@ benchmarking) are documented in the README "Limitations" section.
 
 ## 4. Current State and Gap Analysis
 
-### What exists today (verified in `main` @ 28523d8 — PR #28 merged; latest release still `v0.2.0`)
+### What exists today (verified in `main` @ 830c62c — PR #29 merged; latest release still `v0.2.0`)
 
 | Capability | Status | Evidence |
 |------------|--------|----------|
