@@ -365,6 +365,110 @@ fn test_check_method_get_events() {
     );
 }
 
+/// Local mock server answering a healthy getLedgerEntries flow (GET +
+/// getLedgerEntries). The probe account has no entry on this mock, which
+/// is still a Pass. Loopback only; no live endpoint is contacted.
+fn get_ledger_entries_mock_server() -> mockito::ServerGuard {
+    let mut server = mockito::Server::new();
+    server.mock("GET", "/").with_status(200).create();
+    server
+        .mock("POST", "/")
+        .match_body(mockito::Matcher::Regex(
+            r#""method":"getLedgerEntries""#.to_string(),
+        ))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"jsonrpc":"2.0","id":1,"result":{"entries":[],"latestLedger":5841158}}"#)
+        .create();
+    server
+}
+
+#[test]
+fn test_check_method_get_ledger_entries() {
+    let server = get_ledger_entries_mock_server();
+    let url = server.url();
+    let output = Command::new(BIN)
+        .args(["check", "--url", &url, "--method", "getLedgerEntries"])
+        .output()
+        .expect("failed to execute miyo-rpc check");
+    assert!(
+        output.status.success(),
+        "getLedgerEntries check should pass, got exit {:?}: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("getLedgerEntries"),
+        "output should name the getLedgerEntries check, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("PASS"),
+        "output should show PASS, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("entries_returned: 0"),
+        "output should report the empty result, got: {stdout}"
+    );
+}
+
+/// Local mock server answering a healthy getLedgers flow (GET +
+/// getLatestLedger + getLedgers). The latest ledger is the only page
+/// entry, which is still a Pass. Loopback only; no live endpoint is
+/// contacted.
+fn get_ledgers_mock_server() -> mockito::ServerGuard {
+    let mut server = mockito::Server::new();
+    server.mock("GET", "/").with_status(200).create();
+    server
+        .mock("POST", "/")
+        .match_body(mockito::Matcher::Regex(
+            r#""method":"getLatestLedger""#.to_string(),
+        ))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"jsonrpc":"2.0","id":1,"result":{"id":"abc","sequence":"5841158","closeTime":"1763726400"}}"#)
+        .create();
+    server
+        .mock("POST", "/")
+        .match_body(mockito::Matcher::Regex(
+            r#""method":"getLedgers""#.to_string(),
+        ))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"jsonrpc":"2.0","id":1,"result":{"ledgers":[{"hash":"abc","sequence":5841158,"ledgerCloseTime":"1763726400"}],"latestLedger":5841158,"oldestLedger":5720199,"cursor":"5841158"}}"#)
+        .create();
+    server
+}
+
+#[test]
+fn test_check_method_get_ledgers() {
+    let server = get_ledgers_mock_server();
+    let url = server.url();
+    let output = Command::new(BIN)
+        .args(["check", "--url", &url, "--method", "getLedgers"])
+        .output()
+        .expect("failed to execute miyo-rpc check");
+    assert!(
+        output.status.success(),
+        "getLedgers check should pass, got exit {:?}: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("getLedgers"),
+        "output should name the getLedgers check, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("PASS"),
+        "output should show PASS, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("ledgers_returned: 1"),
+        "output should report the one ledger, got: {stdout}"
+    );
+}
+
 /// Local mock server answering a healthy getHealth (GET + POST).
 /// Used for batch output-format tests (loopback only; no live endpoint
 /// is contacted).
