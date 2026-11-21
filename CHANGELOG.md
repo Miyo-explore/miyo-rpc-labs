@@ -26,6 +26,29 @@ This project ships **two decoupled version numbers**:
 
 ## [Unreleased]
 
+### Added — Built-in `getLedgerEntries` and `getLedgers` checks
+- `check` now runs two more built-in checks, `getLedgerEntries` and
+  `getLedgers`, bringing the total to seven (plus `httpConnectivity`).
+  `--method getLedgerEntries` / `--method getLedgers` run each in isolation.
+- `getLedgerEntries` sends one fixed synthetic probe key — an Account
+  `LedgerKey` for the all-zero ed25519 key, which no real wallet owns — so
+  the check is network-agnostic and needs no `getLatestLedger` round-trip.
+  Details carry `entries_returned` and `latest_ledger`; an empty `entries`
+  array is a Pass (the probe account simply does not exist on that
+  network). Verified live against soroban-testnet.stellar.org, where the
+  probe key resolves to a real entry.
+- `getLedgers` resolves `startLedger` from `getLatestLedger` first (the
+  latest ledger, always in range) and then requests a single page
+  (`pagination.limit` 2 — each ledger carries base64 XDR header +
+  metadata, so the page stays small). The response `cursor` is reported
+  as `has_cursor` but never followed. Details carry `start_ledger`,
+  `ledgers_returned`, `latest_ledger`, `oldest_ledger`, and `has_cursor`;
+  an empty page is a Pass. If `getLatestLedger` fails, `getLedgers`
+  fails instead of probing with a guessed ledger. Covered by mockito
+  tests (request shape, empty result, dependency failure, malformed
+  result, JSON-RPC error) and CLI end-to-end tests. No new dependencies;
+  read-only.
+
 ### Added — Built-in `getEvents` check
 - `check` now runs a fifth built-in check, `getEvents`, in addition to
   `getHealth`, `getNetwork`, `getLatestLedger`, and `getVersionInfo`
