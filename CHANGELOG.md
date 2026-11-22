@@ -26,6 +26,29 @@ This project ships **two decoupled version numbers**:
 
 ## [Unreleased]
 
+### Added — Built-in `getTransactions` check
+- `check` now runs one more built-in check, `getTransactions`, bringing
+  the total to eight (plus `httpConnectivity`).
+  `--method getTransactions` runs it in isolation.
+- `getTransactions` resolves `startLedger` from `getLatestLedger` first
+  (the latest ledger, always in range) and then requests a single page
+  (`pagination.limit` 2 — each transaction carries base64 XDR envelope +
+  result + metadata, so the page stays small). No `includeFailed` is sent,
+  so the server default applies (failed transactions included). The
+  response `cursor` is reported as `has_cursor` but never followed.
+  Details carry `start_ledger`, `transactions_returned`, `latest_ledger`,
+  `oldest_ledger`, and `has_cursor`; an empty page is a Pass. If
+  `getLatestLedger` fails, `getTransactions` fails instead of probing with
+  a guessed ledger. Covered by mockito tests (request shape, empty result,
+  dependency failure, malformed result, JSON-RPC error), a `--compare`
+  coverage test (the compare run includes the new check on both
+  endpoints), and a CLI end-to-end test. Verified live against
+  soroban-testnet.stellar.org: the latest ledger returned 2 transactions
+  (limit 2, `has_cursor` true); full live run 9/9 checks Pass. No new
+  dependencies; read-only.
+- `--compare` now runs the full eight-method built-in set on the second
+  endpoint, including `getTransactions`.
+
 ### Added — Built-in `getLedgerEntries` and `getLedgers` checks
 - `check` now runs two more built-in checks, `getLedgerEntries` and
   `getLedgers`, bringing the total to seven (plus `httpConnectivity`).

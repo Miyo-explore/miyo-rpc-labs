@@ -47,6 +47,7 @@ method check in isolation (the HTTP connectivity check always runs regardless).
 | `getEvents`        | `getEvents`       | Contract events in the latest ledger (one page of 10, no filters).|
 | `getLedgerEntries` | `getLedgerEntries`| Ledger entries for a fixed probe key (one synthetic Account key).  |
 | `getLedgers`       | `getLedgers`      | Ledger headers from the latest ledger (one page of 2).             |
+| `getTransactions`  | `getTransactions` | Transactions in the latest ledger (one page of 2).                 |
 
 ### Status semantics
 
@@ -78,11 +79,13 @@ method check in isolation (the HTTP connectivity check always runs regardless).
   retention window) and fetches a single page of 10 events with no filters;
   the response `cursor` is reported as `has_cursor` but never followed.
   `getLedgers` does the same for ledger headers with a single page of 2.
+  `getTransactions` does the same for transactions with a single page of 2
+  (server default `includeFailed` applies — failed transactions included).
   `getLedgerEntries` sends one fixed synthetic probe key — an Account
   `LedgerKey` for the all-zero ed25519 key, which no real wallet owns — and
   needs no `getLatestLedger` round-trip; an empty `entries` array is a Pass
   (the probe account simply does not exist on that network). The HTTP
-  connectivity probe runs in addition to the seven method checks.
+  connectivity probe runs in addition to the eight method checks.
 - JSON-RPC error codes are classified (`-32601`, `-32602`, `-32603`, etc.) but
   no provider-specific error taxonomy is applied.
 - No archive pagination, cross-provider equivalence, or performance
@@ -183,7 +186,7 @@ miyo-rpc check --help
 | `--url <URL>`      | `-u`  | _required_ | The Stellar JSON-RPC endpoint URL to diagnose.                       |
 | `--output <FMT>`   | `-o`  | `human`   | `human` (colored terminal) or `json`. Colors are off when `NO_COLOR` is set to a non-empty value or stdout is not a terminal. |
 | `--timeout-secs`   | `-t`  | `15`      | Maximum time to wait per HTTP request.                               |
-| `--method <NAME>`  | `-m`  | _(none)_  | Run only the named JSON-RPC method. For a built-in check (`getHealth`, `getNetwork`, `getLatestLedger`, `getVersionInfo`, `getEvents`, `getLedgerEntries`, `getLedgers`) the enriched check runs; for any other name a single arbitrary-method probe runs with `--params`. The HTTP connectivity check (`httpConnectivity`) always runs regardless of this flag. |
+| `--method <NAME>`  | `-m`  | _(none)_  | Run only the named JSON-RPC method. For a built-in check (`getHealth`, `getNetwork`, `getLatestLedger`, `getVersionInfo`, `getEvents`, `getLedgerEntries`, `getLedgers`, `getTransactions`) the enriched check runs; for any other name a single arbitrary-method probe runs with `--params`. The HTTP connectivity check (`httpConnectivity`) always runs regardless of this flag. |
 | `--params <JSON>`  |       | _(none)_  | JSON-RPC `params` for an arbitrary-method probe: a JSON object, array, or `null`. Must be valid JSON, or the CLI exits `2` before any request is sent. Raw params are never echoed in output. Only applies when `--method` names a non-built-in method; otherwise the params are ignored (warning on stderr). |
 | `--params-file <FILE>` |  | _(none)_ | Read JSON-RPC `params` from a file (same JSON rules as `--params`). Only applies when `--method` names a non-built-in method; otherwise the params are ignored (warning on stderr). |
 | `--runs <N>`       | `-n`  | `1`       | Number of diagnostic runs to perform. Clamped to the range `[1, 10]` by the CLI. |
@@ -198,7 +201,8 @@ miyo-rpc check --help
 > **`--method` behavior:** The HTTP connectivity check (`httpConnectivity`)
 > always runs, regardless of `--method`. The flag only filters the
 > **JSON-RPC method checks** (`getHealth`, `getNetwork`, `getLatestLedger`,
-> `getVersionInfo`, `getEvents`, `getLedgerEntries`, `getLedgers`). Method checks that do not match are reported as `SKIP`
+> `getVersionInfo`, `getEvents`, `getLedgerEntries`, `getLedgers`,
+> `getTransactions`). Method checks that do not match are reported as `SKIP`
 > with `evidence` set to `"Skipped: --method filter does not match this
 > check."`.
 
@@ -270,9 +274,9 @@ By default the tool runs every check exactly once (`--runs 1`). Use
 
 ## Arbitrary Method Probing
 
-By default `check` runs the seven built-in checks (`getHealth`, `getNetwork`,
+By default `check` runs the eight built-in checks (`getHealth`, `getNetwork`,
 `getLatestLedger`, `getVersionInfo`, `getEvents`, `getLedgerEntries`,
-`getLedgers`) plus `httpConnectivity`. To exercise a
+`getLedgers`, `getTransactions`) plus `httpConnectivity`. To exercise a
 Soroban method that is not built in — e.g. `getTransaction`,
 or `simulateTransaction` — pass its name to `--method` together
 with JSON-RPC `params`:
@@ -373,7 +377,17 @@ Endpoint: https://soroban-testnet.stellar.org
     has_cursor: true
     evidence: Sent JSON-RPC 2.0 POST to https://soroban-testnet.stellar.org with method 'getLedgers' and params {startLedger: 51583040, pagination: {limit: 2}} (startLedger resolved from getLatestLedger).
 
-Summary: 8 passed, 0 failed, 0 skipped (8 ran)
+  PASS getTransactions  (71ms)
+    description: "Transactions in the latest ledger (one page)."
+    http_status: 200
+    start_ledger: 51583040
+    transactions_returned: 1
+    latest_ledger: 51583040
+    oldest_ledger: 51565760
+    has_cursor: true
+    evidence: Sent JSON-RPC 2.0 POST to https://soroban-testnet.stellar.org with method 'getTransactions' and params {startLedger: 51583040, pagination: {limit: 2}} (startLedger resolved from getLatestLedger).
+
+Summary: 9 passed, 0 failed, 0 skipped (9 ran)
 ```
 
 ### Human-readable output (repeated runs)
@@ -468,9 +482,9 @@ read `schema_version` and MUST ignore fields they do not recognize.
 }
 ```
 
-> **Note:** This example is abbreviated. The real report contains eight
-> `checks` entries (`httpConnectivity` plus the seven JSON-RPC methods). Here,
-> two are shown inline for illustration; `summary` reflects all eight: `ran`
+> **Note:** This example is abbreviated. The real report contains nine
+> `checks` entries (`httpConnectivity` plus the eight JSON-RPC methods). Here,
+> two are shown inline for illustration; `summary` reflects all nine: `ran`
 > counts checks that executed (`passed` + `failed`), `skipped` counts checks
 > not performed, and `total_runs` equals the top-level `runs` value.
 

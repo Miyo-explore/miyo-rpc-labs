@@ -239,6 +239,13 @@ pub const GET_EVENTS_PAGE_LIMIT: u64 = 10;
 /// metadata, so a check proves the method works, it does not stream history.
 pub const GET_LEDGERS_PAGE_LIMIT: u64 = 2;
 
+/// Maximum number of transactions fetched per page by the built-in
+/// `getTransactions` check. The Stellar RPC limit is 1–200 (default 50);
+/// 2 keeps the diagnostic response small — each transaction carries base64
+/// XDR envelope + result + metadata, so a check proves the method works,
+/// it does not stream history.
+pub const GET_TRANSACTIONS_PAGE_LIMIT: u64 = 2;
+
 /// Base64-encoded XDR of the `LedgerKey` probed by the built-in
 /// `getLedgerEntries` check: an Account key for the all-zero ed25519 key
 /// (union discriminant 0 = ACCOUNT, key type 0 = ED25519, 32 zero bytes).
@@ -652,6 +659,154 @@ impl RpcCheck for GetLedgersCheck {
     }
 }
 
+/// A built-in check for the Stellar RPC `getTransactions` method.
+///
+/// Like `getEvents` and `getLedgers`, `getTransactions` requires a
+/// `startLedger` inside the endpoint's retention window, so the check first
+/// asks `getLatestLedger` for the latest sequence and then requests a single
+/// page (`pagination.limit` = [`GET_TRANSACTIONS_PAGE_LIMIT`], starting at
+/// that ledger — the latest ledger itself is always in range). No
+/// `includeFailed` is sent, so the server default applies (failed
+/// transactions included). The response `cursor` is reported as `has_cursor`
+/// but is never followed: a diagnostics check fetches one page, it does not
+/// stream history. Details carry `start_ledger`, `transactions_returned`,
+/// `latest_ledger`, `oldest_ledger`, and `has_cursor`; an empty page is a
+/// Pass. If `getLatestLedger` fails, `getTransactions` fails instead of
+/// probing with a guessed ledger. No user-supplied params are involved —
+/// `--params` is still ignored for built-in methods.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GetTransactionsCheck;
+
+impl RpcCheck for GetTransactionsCheck {
+    fn name(&self) -> &str {
+        "getTransactions"
+    }
+
+    fn run<'a>(
+        &'a self,
+        client: &'a RpcClient,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = CheckResult> + Send + 'a>> {
+        Box::pin(async move {
+            let endpoint = client.sanitized_url();
+            let timestamp = chrono::Utc::now().to_rfc3339();
+            let method = "getTransactions";
+
+            // 1. Resolve startLedger from getLatestLedger: the request is
+            // rejected when startLedger is outside the retained window, so
+            // a hardcoded ledger would rot. The latest ledger is always in
+            // range (startLedger is inclusive).
+            let sequence = match client.call::<Value>("getLatestLedger", None).await {
+                Ok((_, result)) => match parse_ledger_sequence(&result) {
+                    Some(seq) => seq,
+                    None => {
+                        return fail_result(
+                            method,
+                            &endpoint,
+                            timestamp,
+                            &MiyoError::MalformedStructure(
+                                "getLatestLedger result has no usable 'sequence' field".to_string(),
+                            ),
+                            "Call getLatestLedger to resolve the startLedger for getTransactions."
+                                .to_string(),
+                        );
+                    }
+                },
+                Err(e) => {
+                    return fail_result(
+                        method,
+                        &endpoint,
+                        timestamp,
+                        &e,
+                        "Call getLatestLedger to resolve the startLedger for getTransactions before calling getTransactions."
+                            .to_string(),
+                    );
+                }
+            };
+
+            // 2. Fetch one page of transactions starting at the latest ledger.
+            let params = serde_json::json!({
+                "startLedger": sequence,
+                "pagination": { "limit": GET_TRANSACTIONS_PAGE_LIMIT },
+            });
+            let evidence = format!(
+                "Sent JSON-RPC 2.0 POST to {endpoint} with method 'getTransactions' and params {{startLedger: {sequence}, pagination: {{limit: {GET_TRANSACTIONS_PAGE_LIMIT}}}}} (startLedger resolved from getLatestLedger)."
+            );
+            match client.call::<Value>(method, Some(params)).await {
+                Ok((info, result)) => {
+                    let transactions = match result.get("transactions").and_then(Value::as_array) {
+                        Some(transactions) => transactions,
+                        None => {
+                            return fail_result(
+                                method,
+                                &endpoint,
+                                timestamp,
+                                &MiyoError::MalformedStructure(
+                                    "getTransactions result has no 'transactions' array"
+                                        .to_string(),
+                                ),
+                                evidence,
+                            );
+                        }
+                    };
+                    let duration_ms = info.duration.as_millis() as u64;
+                    let mut details = serde_json::Map::new();
+                    details.insert(
+                        "description".to_string(),
+                        Value::String("Transactions in the latest ledger (one page).".to_string()),
+                    );
+                    details.insert(
+                        "http_status".to_string(),
+                        Value::Number(serde_json::Number::from(info.status)),
+                    );
+                    details.insert(
+                        "start_ledger".to_string(),
+                        Value::Number(serde_json::Number::from(sequence)),
+                    );
+                    details.insert(
+                        "transactions_returned".to_string(),
+                        Value::Number(serde_json::Number::from(transactions.len())),
+                    );
+                    if let Some(latest) = parse_u64_field(&result, "latestLedger") {
+                        details.insert(
+                            "latest_ledger".to_string(),
+                            Value::Number(serde_json::Number::from(latest)),
+                        );
+                    }
+                    if let Some(oldest) = parse_u64_field(&result, "oldestLedger") {
+                        details.insert(
+                            "oldest_ledger".to_string(),
+                            Value::Number(serde_json::Number::from(oldest)),
+                        );
+                    }
+                    details.insert(
+                        "has_cursor".to_string(),
+                        Value::Bool(
+                            result
+                                .get("cursor")
+                                .and_then(Value::as_str)
+                                .is_some_and(|c| !c.is_empty()),
+                        ),
+                    );
+
+                    CheckResult {
+                        name: method.to_string(),
+                        status: CheckStatus::Pass,
+                        timestamp,
+                        duration_ms: Some(duration_ms),
+                        http_status: Some(info.status),
+                        endpoint: endpoint.clone(),
+                        details: Some(details),
+                        error: None,
+                        error_message: None,
+                        evidence: Some(evidence),
+                    }
+                }
+                Err(e) => fail_result(method, &endpoint, timestamp, &e, evidence),
+            }
+        })
+    }
+}
+
 /// Check raw HTTP connectivity and status code — independent of JSON-RPC.
 pub async fn http_connectivity_check(
     url: &str,
@@ -784,11 +939,11 @@ fn fail_result(
 
 /// All built-in checks that the `check` command runs by default.
 ///
-/// Four are no-parameter method checks; `getEvents` and `getLedgers`
-/// derive their own `startLedger` from `getLatestLedger` and fetch one
-/// page each (see [`GetEventsCheck`] and [`GetLedgersCheck`]);
-/// `getLedgerEntries` probes a fixed synthetic key (see
-/// [`GetLedgerEntriesCheck`]).
+/// Four are no-parameter method checks; `getEvents`, `getLedgers`, and
+/// `getTransactions` derive their own `startLedger` from `getLatestLedger`
+/// and fetch one page each (see [`GetEventsCheck`], [`GetLedgersCheck`],
+/// and [`GetTransactionsCheck`]); `getLedgerEntries` probes a fixed
+/// synthetic key (see [`GetLedgerEntriesCheck`]).
 pub fn all_checks() -> Vec<Box<dyn RpcCheck + Send + Sync>> {
     vec![
         Box::new(SimpleMethodCheck {
@@ -814,6 +969,7 @@ pub fn all_checks() -> Vec<Box<dyn RpcCheck + Send + Sync>> {
         Box::new(GetEventsCheck),
         Box::new(GetLedgerEntriesCheck),
         Box::new(GetLedgersCheck),
+        Box::new(GetTransactionsCheck),
     ]
 }
 
@@ -826,6 +982,7 @@ pub const BUILTIN_METHODS: &[&str] = &[
     "getEvents",
     "getLedgerEntries",
     "getLedgers",
+    "getTransactions",
 ];
 
 /// Whether `name` refers to one of the built-in checks ([`BUILTIN_METHODS`]).
@@ -1816,15 +1973,11 @@ mod tests {
             "getEvents",
             "getLedgerEntries",
             "getLedgers",
+            "getTransactions",
         ] {
             assert!(is_builtin_method(m), "{m} should be built-in");
         }
-        for m in [
-            "getTransactions",
-            "getTransaction",
-            "simulateTransaction",
-            "",
-        ] {
+        for m in ["getTransaction", "simulateTransaction", ""] {
             assert!(!is_builtin_method(m), "{m} should not be built-in");
         }
     }
@@ -1956,7 +2109,7 @@ mod tests {
         assert_eq!(GetEventsCheck.name(), "getEvents");
         assert_eq!(GET_EVENTS_PAGE_LIMIT, 10);
         assert!(is_builtin_method("getEvents"));
-        assert_eq!(BUILTIN_METHODS.len(), 7);
+        assert_eq!(BUILTIN_METHODS.len(), 8);
         let checks = all_checks();
         let names: Vec<&str> = checks.iter().map(|c| c.name()).collect();
         assert_eq!(
@@ -1968,9 +2121,17 @@ mod tests {
                 "getVersionInfo",
                 "getEvents",
                 "getLedgerEntries",
-                "getLedgers"
+                "getLedgers",
+                "getTransactions"
             ]
         );
+    }
+
+    #[test]
+    fn test_get_transactions_check_name_and_page_limit() {
+        assert_eq!(GetTransactionsCheck.name(), "getTransactions");
+        assert_eq!(GET_TRANSACTIONS_PAGE_LIMIT, 2);
+        assert!(is_builtin_method("getTransactions"));
     }
 
     #[test]
