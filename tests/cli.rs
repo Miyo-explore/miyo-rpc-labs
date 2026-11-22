@@ -469,6 +469,63 @@ fn test_check_method_get_ledgers() {
     );
 }
 
+/// Local mock server answering a healthy getTransactions flow (GET +
+/// getLatestLedger + getTransactions). The latest ledger holds one
+/// transaction, which is still a Pass. Loopback only; no live endpoint is
+/// contacted.
+fn get_transactions_mock_server() -> mockito::ServerGuard {
+    let mut server = mockito::Server::new();
+    server.mock("GET", "/").with_status(200).create();
+    server
+        .mock("POST", "/")
+        .match_body(mockito::Matcher::Regex(
+            r#""method":"getLatestLedger""#.to_string(),
+        ))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"jsonrpc":"2.0","id":1,"result":{"id":"abc","sequence":"5841158","closeTime":"1763726400"}}"#)
+        .create();
+    server
+        .mock("POST", "/")
+        .match_body(mockito::Matcher::Regex(
+            r#""method":"getTransactions""#.to_string(),
+        ))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"jsonrpc":"2.0","id":1,"result":{"transactions":[{"status":"SUCCESS","hash":"abc","ledger":5841158,"createdAt":"1763726400","applicationOrder":1,"feeCharged":"100","operationCount":1,"envelopeXdr":"AAAAAQ==","resultXdr":"AAAAAAAAAAGQAAAAAAAAAA","resultMetaXdr":"AAAAAA=="}],"latestLedger":5841158,"oldestLedger":5720199,"cursor":"5841158-0000000001"}}"#)
+        .create();
+    server
+}
+
+#[test]
+fn test_check_method_get_transactions() {
+    let server = get_transactions_mock_server();
+    let url = server.url();
+    let output = Command::new(BIN)
+        .args(["check", "--url", &url, "--method", "getTransactions"])
+        .output()
+        .expect("failed to execute miyo-rpc check");
+    assert!(
+        output.status.success(),
+        "getTransactions check should pass, got exit {:?}: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("getTransactions"),
+        "output should name the getTransactions check, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("PASS"),
+        "output should show PASS, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("transactions_returned: 1"),
+        "output should report the one transaction, got: {stdout}"
+    );
+}
+
 /// Local mock server answering a healthy getHealth (GET + POST).
 /// Used for batch output-format tests (loopback only; no live endpoint
 /// is contacted).
