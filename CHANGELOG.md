@@ -26,6 +26,13 @@ This project ships **two decoupled version numbers**:
 
 ## [Unreleased]
 
+### Added — Public endpoint report (2026-11-23)
+- `docs/ENDPOINT-REPORT-2026-11.md`: live run of all 8 built-in checks
+  (3 runs each) against the public Stellar RPC endpoints — Testnet 8/9,
+  Futurenet 9/9, Mainnet 7/9 on first run (9/9 on retry). Endpoint URLs
+  verified against the official Stellar docs at run time. Linked from the
+  README ("Live endpoint report"). Docs only; no code change.
+
 ### Added — Built-in `getTransactions` check
 - `check` now runs one more built-in check, `getTransactions`, bringing
   the total to eight (plus `httpConnectivity`).
