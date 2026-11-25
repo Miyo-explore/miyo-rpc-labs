@@ -24,7 +24,7 @@ This project ships **two decoupled version numbers**:
   Consumers MUST read `schema_version` and MUST ignore fields they do not
   recognize.
 
-## [Unreleased]
+## [0.3.0] - 2026-11-25
 
 ### Added — Public endpoint report (2026-11-23)
 - `docs/ENDPOINT-REPORT-2026-11.md`: live run of all 8 built-in checks
