@@ -91,7 +91,7 @@ benchmarking) are documented in the README "Limitations" section.
 
 ## 4. Current State and Gap Analysis
 
-### What exists today (verified in `main` @ 146d53b — PR #30 merged; latest release still `v0.2.0`)
+### What exists today (verified in `main` @ 959ab49 — PR #38 merged; latest release `v0.3.0`)
 
 | Capability | Status | Evidence |
 |------------|--------|----------|
@@ -215,7 +215,8 @@ limitations are tracked in the README "Limitations" section:
 - **Validation:** YAML lint clean; local `cargo fmt --check` / `cargo clippy -D
   warnings` / `cargo test --all-targets` green. Hosted CI green on every `main`
   push; tag releases executed for `v0.1.0` (release workflow run `40001191938`)
-  and `v0.2.0` (run `44447776098`, success).
+  and `v0.2.0` (run `44447776098`, success) and `v0.3.0` (run `45536491155`,
+  success).
 
 ### Milestone 6 — Cross-Platform Releases (implemented — shipped in `v0.1.0`)
 
@@ -228,8 +229,8 @@ limitations are tracked in the README "Limitations" section:
 - **Dependencies:** Milestone 5.
 - **Priority:** P3.
 - **Validation:** YAML lint clean; all four matrix targets compiled and packaged
-  on hosted runners for `v0.1.0` and `v0.2.0` (release workflow runs
-  `40001191938` and `44447776098` — 4 builds + publish success each).
+  on hosted runners for `v0.1.0`, `v0.2.0`, and `v0.3.0` (release workflow runs
+  `40001191938`, `44447776098`, and `45536491155` — 4 builds + publish success each).
 
 ## 6. Success Criteria
 
