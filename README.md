@@ -67,6 +67,7 @@ method check in isolation (the HTTP connectivity check always runs regardless).
 | `getTransactions`  | `getTransactions` | Transactions in the latest ledger (one page of 2).                 |
 | `getFeeStats`      | `getFeeStats`     | Fee statistics for recent ledgers (inclusion fee percentiles).     |
 | `getTransaction`   | `getTransaction`  | Single transaction by hash (first transaction in the latest ledger).|
+| `simulateTransaction` | `simulateTransaction` | Simulates a real InvokeHostFunction transaction (Testnet probe, replayed; Skips on other networks). |
 
 Status semantics and limitations: [docs/checks.md](docs/checks.md).
 
@@ -97,7 +98,7 @@ miyo-rpc check --url <RPC_URL> --runs 5              # repeat 5× with latency s
 miyo-rpc check --url <RPC_URL> --expected-network testnet  # validate network identity (testnet/mainnet/futurenet)
 miyo-rpc check --url <RPC_URL> --compare <SECOND_RPC_URL>   # compare network identity + ledger against a second endpoint
 miyo-rpc check --url <RPC_URL> --method getFeeStats    # one built-in check (httpConnectivity still runs)
-miyo-rpc check --url <RPC_URL> --method simulateTransaction --params-file tx.json        # params from a file
+miyo-rpc check --url <RPC_URL> --method getNewMethod --params '{"key":"..."}'   # probe a not-yet-built-in method with params
 miyo-rpc batch --file endpoints.txt                          # diagnose many endpoints (one URL per line; see Batch Mode)
 miyo-rpc batch --file endpoints.txt --output json            # aggregated JSON (schema_version "1.0")
 miyo-rpc --help

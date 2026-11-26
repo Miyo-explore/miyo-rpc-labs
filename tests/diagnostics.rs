@@ -565,17 +565,43 @@ async fn test_report_all_success() {
         })))
         .create();
 
+    // Mock simulateTransaction. The check first calls getNetwork (mock
+    // above returns the Testnet passphrase), then replays the embedded
+    // Testnet probe envelope; the exact envelope bytes are not matched
+    // here — the dedicated tests pin the request shape.
+    server
+        .mock("POST", "/")
+        .match_body(mockito::Matcher::Regex(
+            r#""method":"simulateTransaction""#.to_string(),
+        ))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(json_body(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "latestLedger": 2002985,
+                "minResourceFee": "31052",
+                "cost": {"cpuInsns": "1036915", "memBytes": "51240"},
+                "results": [{"auth": [], "retval": "AAAAAQAAAAA="}],
+                "transactionData": "AAAAAQ==",
+                "events": [],
+                "stateChanges": []
+            }
+        })))
+        .create();
+
     let report = DiagnosticReport::run_all(&url, Duration::from_secs(5), None, 1).await;
 
-    // Should have httpConnectivity + 10 method checks = 11 total
-    assert_eq!(report.checks.len(), 11);
+    // Should have httpConnectivity + 11 method checks = 12 total
+    assert_eq!(report.checks.len(), 12);
 
     // HTTP connectivity should pass (200)
     let http_check = report.checks.iter().find(|c| c.name == "httpConnectivity");
     assert!(http_check.is_some());
     assert_eq!(http_check.unwrap().status, CheckStatus::Pass);
 
-    // All 10 RPC method checks should pass
+    // All 11 RPC method checks should pass
     for name in [
         "getHealth",
         "getNetwork",
@@ -587,6 +613,7 @@ async fn test_report_all_success() {
         "getTransactions",
         "getFeeStats",
         "getTransaction",
+        "simulateTransaction",
     ] {
         let check = report.checks.iter().find(|c| c.name == name);
         assert!(check.is_some(), "should have check for {name}");
@@ -688,7 +715,26 @@ async fn test_report_all_success() {
     assert_eq!(details.get("has_result_xdr"), Some(&Value::Bool(true)));
     assert_eq!(details.get("has_result_meta_xdr"), Some(&Value::Bool(true)));
 
-    assert_eq!(report.summary.passed, 11);
+    // simulateTransaction replayed the Testnet probe envelope and
+    // reported the simulation result.
+    let simulate_check = find_check(&report, "simulateTransaction");
+    let details = simulate_check
+        .details
+        .as_ref()
+        .expect("simulateTransaction should carry details");
+    assert_eq!(
+        details.get("min_resource_fee"),
+        Some(&Value::from(31052u64))
+    );
+    assert_eq!(details.get("results_count"), Some(&Value::from(1u64)));
+    assert_eq!(details.get("latest_ledger"), Some(&Value::from(2002985u64)));
+    assert_eq!(
+        details.get("cost_cpu_insns"),
+        Some(&Value::from(1036915u64))
+    );
+    assert_eq!(details.get("cost_mem_bytes"), Some(&Value::from(51240u64)));
+
+    assert_eq!(report.summary.passed, 12);
     assert_eq!(report.summary.failed, 0);
 }
 
@@ -701,7 +747,7 @@ async fn test_report_all_json_rpc_errors() {
     server
         .mock("POST", "/")
         .match_body(mockito::Matcher::Regex(
-            r#""method":"(getHealth|getNetwork|getLatestLedger|getVersionInfo|getEvents|getLedgerEntries|getLedgers|getTransactions|getFeeStats|getTransaction)""#
+            r#""method":"(getHealth|getNetwork|getLatestLedger|getVersionInfo|getEvents|getLedgerEntries|getLedgers|getTransactions|getFeeStats|getTransaction|simulateTransaction)""#
                 .to_string(),
         ))
         .with_status(200)
@@ -718,20 +764,21 @@ async fn test_report_all_json_rpc_errors() {
 
     let report = DiagnosticReport::run_all(&url, Duration::from_secs(5), None, 1).await;
 
-    // 10 RPC method checks should all be Fail (getEvents, getLedgers,
-    // getTransactions, and getTransaction fail too: their internal
-    // getLatestLedger calls hit the same -32601 mock).
+    // 11 RPC method checks should all be Fail (getEvents, getLedgers,
+    // getTransactions, getTransaction, and simulateTransaction fail too:
+    // their internal getLatestLedger / getNetwork calls hit the same
+    // -32601 mock).
     let rpc_checks: Vec<_> = report
         .checks
         .iter()
         .filter(|c| c.name != "httpConnectivity")
         .collect();
-    assert_eq!(rpc_checks.len(), 10);
+    assert_eq!(rpc_checks.len(), 11);
     for c in &rpc_checks {
         assert_eq!(c.status, CheckStatus::Fail, "{} should fail", c.name);
     }
 
-    assert_eq!(report.summary.failed, 11);
+    assert_eq!(report.summary.failed, 12);
 }
 
 /// Test method filter (--method).
@@ -3047,8 +3094,9 @@ fn test_is_builtin_method_public() {
     assert!(miyo_rpc::is_builtin_method("getTransactions"));
     assert!(miyo_rpc::is_builtin_method("getFeeStats"));
     assert!(miyo_rpc::is_builtin_method("getTransaction"));
-    assert!(!miyo_rpc::is_builtin_method("simulateTransaction"));
-    assert_eq!(miyo_rpc::BUILTIN_METHODS.len(), 10);
+    assert!(miyo_rpc::is_builtin_method("simulateTransaction"));
+    assert!(!miyo_rpc::is_builtin_method("sendTransaction"));
+    assert_eq!(miyo_rpc::BUILTIN_METHODS.len(), 11);
 }
 
 #[test]
@@ -3158,7 +3206,7 @@ async fn test_get_events_request_params_from_latest_ledger() {
     assert_eq!(details.get("has_cursor"), Some(&Value::Bool(true)));
     // The filter leaves the other built-ins skipped, not omitted.
     assert_eq!(report.summary.passed, 2); // httpConnectivity + getEvents
-    assert_eq!(report.summary.skipped, 9);
+    assert_eq!(report.summary.skipped, 10);
 }
 
 /// An empty page is still a Pass: the method works, the latest ledger
@@ -3384,7 +3432,7 @@ async fn test_get_ledger_entries_request_params_probe_key() {
     assert_eq!(details.get("latest_ledger"), Some(&Value::from(5841158u64)));
     // The filter leaves the other built-ins skipped, not omitted.
     assert_eq!(report.summary.passed, 2); // httpConnectivity + getLedgerEntries
-    assert_eq!(report.summary.skipped, 9);
+    assert_eq!(report.summary.skipped, 10);
 }
 
 /// An empty `entries` array is still a Pass: the method works, the probe
@@ -3568,7 +3616,7 @@ async fn test_get_ledgers_request_params_from_latest_ledger() {
     assert_eq!(details.get("has_cursor"), Some(&Value::Bool(true)));
     // The filter leaves the other built-ins skipped, not omitted.
     assert_eq!(report.summary.passed, 2); // httpConnectivity + getLedgers
-    assert_eq!(report.summary.skipped, 9);
+    assert_eq!(report.summary.skipped, 10);
 }
 
 /// An empty page is still a Pass: the method works, the window simply
@@ -3804,7 +3852,7 @@ async fn test_get_transactions_request_params_from_latest_ledger() {
     assert_eq!(details.get("has_cursor"), Some(&Value::Bool(true)));
     // The filter leaves the other built-ins skipped, not omitted.
     assert_eq!(report.summary.passed, 2); // httpConnectivity + getTransactions
-    assert_eq!(report.summary.skipped, 9);
+    assert_eq!(report.summary.skipped, 10);
 }
 
 /// An empty page is still a Pass: the method works, the latest ledger
@@ -4005,8 +4053,8 @@ async fn test_compare_covers_get_transactions() {
             "getTransactions must run and pass on the compare endpoint too"
         );
     }
-    assert_eq!(primary.checks.len(), 11);
-    assert_eq!(other.checks.len(), 11);
+    assert_eq!(primary.checks.len(), 12);
+    assert_eq!(other.checks.len(), 12);
 
     // Comparing two identical reports must keep getTransactions present
     // and passing, with no divergence flagged on it.
@@ -4103,7 +4151,7 @@ async fn test_get_fee_stats_success() {
     assert_eq!(details.get("latest_ledger"), Some(&Value::from(5933141u64)));
     // The filter leaves the other built-ins skipped, not omitted.
     assert_eq!(report.summary.passed, 2); // httpConnectivity + getFeeStats
-    assert_eq!(report.summary.skipped, 9);
+    assert_eq!(report.summary.skipped, 10);
 }
 
 /// A `getFeeStats` result without either fee object is malformed, not a
@@ -4207,8 +4255,8 @@ async fn test_compare_covers_get_fee_stats() {
             "getFeeStats must run and pass on the compare endpoint too"
         );
     }
-    assert_eq!(primary.checks.len(), 11);
-    assert_eq!(other.checks.len(), 11);
+    assert_eq!(primary.checks.len(), 12);
+    assert_eq!(other.checks.len(), 12);
 
     primary.compare_with(&other);
     let check = find_check(&primary, "getFeeStats");
@@ -4337,7 +4385,7 @@ async fn test_get_transaction_request_params_from_latest_ledger() {
     assert_eq!(details.get("has_result_meta_xdr"), Some(&Value::Bool(true)));
     // The filter leaves the other built-ins skipped, not omitted.
     assert_eq!(report.summary.passed, 2); // httpConnectivity + getTransaction
-    assert_eq!(report.summary.skipped, 9);
+    assert_eq!(report.summary.skipped, 10);
 }
 
 /// An empty page is a Skip, not a Fail: there is no transaction to fetch,
@@ -4375,7 +4423,7 @@ async fn test_get_transaction_empty_page_skips() {
         "skip evidence must say why there is nothing to fetch: {evidence}"
     );
     assert_eq!(report.summary.passed, 1); // httpConnectivity only
-    assert_eq!(report.summary.skipped, 10);
+    assert_eq!(report.summary.skipped, 11);
 }
 
 /// Older RPC versions return the page hash as `hash` instead of
@@ -4663,13 +4711,410 @@ async fn test_compare_covers_get_transaction() {
             "getTransaction must run and pass on the compare endpoint too"
         );
     }
-    assert_eq!(primary.checks.len(), 11);
-    assert_eq!(other.checks.len(), 11);
+    assert_eq!(primary.checks.len(), 12);
+    assert_eq!(other.checks.len(), 12);
 
     // Comparing two identical reports must keep getTransaction present
     // and passing, with no divergence flagged on it.
     primary.compare_with(&other);
     let check = find_check(&primary, "getTransaction");
+    assert_eq!(check.status, CheckStatus::Pass);
+    let evidence = check.evidence.as_deref().unwrap_or("");
+    assert!(
+        !evidence.contains("divergence"),
+        "identical endpoints must not flag divergence: {evidence}"
+    );
+}
+
+// ────────────────────────────
+// simulateTransaction built-in check
+// ────────────────────────────
+
+/// Mock a `getNetwork` success returning the given passphrase.
+fn mock_get_network_passphrase(server: &mut mockito::Server, passphrase: &str) {
+    server
+        .mock("POST", "/")
+        .match_body(mockito::Matcher::Regex(
+            r#""method":"getNetwork""#.to_string(),
+        ))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(json_body(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "friendbotUrl": "https://friendbot.stellar.org",
+                "passphrase": passphrase,
+                "protocolVersion": 23
+            }
+        })))
+        .create();
+}
+
+/// Mock a `simulateTransaction` success returning the given `result`.
+fn mock_simulate_transaction_result(server: &mut mockito::Server, result: Value) {
+    server
+        .mock("POST", "/")
+        .match_body(mockito::Matcher::Regex(
+            r#""method":"simulateTransaction""#.to_string(),
+        ))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(json_body(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": result
+        })))
+        .create();
+}
+
+/// A successful simulation result (shape verified live against
+/// soroban-testnet.stellar.org for the embedded probe transaction).
+fn simulate_success_result() -> Value {
+    json!({
+        "latestLedger": 5933150,
+        "minResourceFee": "31052",
+        "cost": {"cpuInsns": "1036915", "memBytes": "51240"},
+        "results": [{"auth": [], "retval": "AAAAAQAAAAA="}],
+        "transactionData": "AAAAAQ==",
+        "events": [],
+        "stateChanges": []
+    })
+}
+
+/// On Testnet the check replays the embedded probe envelope verbatim
+/// (exact-body matcher pins the envelope bytes) and reports the
+/// simulation result.
+#[tokio::test]
+async fn test_simulate_transaction_success_testnet() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+
+    server
+        .mock("GET", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("{}")
+        .create();
+
+    mock_get_network_passphrase(&mut server, "Test SDF Network ; September 2015");
+
+    server
+        .mock("POST", "/")
+        .match_body(mockito::Matcher::Json(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "simulateTransaction",
+            "params": {"transaction": miyo_rpc::diagnostics::SIMULATE_TRANSACTION_TESTNET_PROBE_ENVELOPE}
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(json_body(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": simulate_success_result()
+        })))
+        .create();
+
+    let report =
+        DiagnosticReport::run_all(&url, Duration::from_secs(5), Some("simulateTransaction"), 1)
+            .await;
+
+    let check = find_check(&report, "simulateTransaction");
+    assert_eq!(check.status, CheckStatus::Pass);
+    let details = check.details.as_ref().expect("simulateTransaction details");
+    assert_eq!(
+        details.get("tx_hash"),
+        Some(&Value::String(
+            "bbcc753be258d79ad3caa1c66ae150116ab1bc91103b98f7d52a2a4481c38d95".to_string()
+        ))
+    );
+    assert_eq!(
+        details.get("min_resource_fee"),
+        Some(&Value::from(31052u64))
+    );
+    assert_eq!(details.get("results_count"), Some(&Value::from(1u64)));
+    assert_eq!(details.get("latest_ledger"), Some(&Value::from(5933150u64)));
+    assert_eq!(
+        details.get("cost_cpu_insns"),
+        Some(&Value::from(1036915u64))
+    );
+    assert_eq!(details.get("cost_mem_bytes"), Some(&Value::from(51240u64)));
+    // The filter leaves the other built-ins skipped, not omitted.
+    assert_eq!(report.summary.passed, 2); // httpConnectivity + simulateTransaction
+    assert_eq!(report.summary.skipped, 10);
+}
+
+/// The probe transaction only exists on Testnet: on Mainnet the check
+/// Skips with evidence naming the limitation, instead of failing an
+/// otherwise healthy endpoint.
+#[tokio::test]
+async fn test_simulate_transaction_skips_on_mainnet() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+
+    server
+        .mock("GET", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("{}")
+        .create();
+
+    mock_get_network_passphrase(
+        &mut server,
+        "Public Global Stellar Network ; September 2015",
+    );
+
+    let report =
+        DiagnosticReport::run_all(&url, Duration::from_secs(5), Some("simulateTransaction"), 1)
+            .await;
+
+    let check = find_check(&report, "simulateTransaction");
+    assert_eq!(check.status, CheckStatus::Skip);
+    let evidence = check.evidence.as_deref().unwrap_or("");
+    assert!(
+        evidence.contains("mainnet"),
+        "skip evidence must name the detected network: {evidence}"
+    );
+    assert!(
+        evidence.contains("Testnet"),
+        "skip evidence must say the probe is Testnet-specific: {evidence}"
+    );
+    assert_eq!(report.summary.passed, 1); // httpConnectivity only
+    assert_eq!(report.summary.skipped, 11);
+}
+
+/// Same Skip as Mainnet, for Futurenet.
+#[tokio::test]
+async fn test_simulate_transaction_skips_on_futurenet() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+
+    server
+        .mock("GET", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("{}")
+        .create();
+
+    mock_get_network_passphrase(&mut server, "Test SDF Future Network ; October 2022");
+
+    let report =
+        DiagnosticReport::run_all(&url, Duration::from_secs(5), Some("simulateTransaction"), 1)
+            .await;
+
+    let check = find_check(&report, "simulateTransaction");
+    assert_eq!(check.status, CheckStatus::Skip);
+    let evidence = check.evidence.as_deref().unwrap_or("");
+    assert!(
+        evidence.contains("futurenet"),
+        "skip evidence must name the detected network: {evidence}"
+    );
+}
+
+/// When `getNetwork` fails, the check cannot determine the network and
+/// must Fail (not guess Testnet and simulate anyway).
+#[tokio::test]
+async fn test_simulate_transaction_fails_when_get_network_fails() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+
+    server
+        .mock("GET", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("{}")
+        .create();
+
+    server
+        .mock("POST", "/")
+        .match_body(mockito::Matcher::Regex(
+            r#""method":"getNetwork""#.to_string(),
+        ))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(json_body(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "error": {"code": -32603, "message": "Internal error"}
+        })))
+        .create();
+
+    let report =
+        DiagnosticReport::run_all(&url, Duration::from_secs(5), Some("simulateTransaction"), 1)
+            .await;
+
+    let check = find_check(&report, "simulateTransaction");
+    assert_eq!(check.status, CheckStatus::Fail);
+    assert_eq!(
+        check.error,
+        Some(miyo_rpc::IssueCategory::JsonRpcError),
+        "underlying getNetwork JSON-RPC error must surface"
+    );
+    let evidence = check.evidence.as_deref().unwrap_or("");
+    assert!(
+        evidence.contains("getNetwork"),
+        "evidence must name the failed dependency: {evidence}"
+    );
+}
+
+/// A result-level `error` means the probe invocation itself failed to
+/// simulate (e.g. the probe contract is gone): the method answered, but
+/// the check cannot prove it simulates a real invocation.
+#[tokio::test]
+async fn test_simulate_transaction_result_error_fails() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+
+    server
+        .mock("GET", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("{}")
+        .create();
+
+    mock_get_network_passphrase(&mut server, "Test SDF Network ; September 2015");
+    mock_simulate_transaction_result(
+        &mut server,
+        json!({
+            "latestLedger": 5933150,
+            "error": "transaction contains unsupported operation type: OperationTypeManageData"
+        }),
+    );
+
+    let report =
+        DiagnosticReport::run_all(&url, Duration::from_secs(5), Some("simulateTransaction"), 1)
+            .await;
+
+    let check = find_check(&report, "simulateTransaction");
+    assert_eq!(check.status, CheckStatus::Fail);
+    assert_eq!(
+        check.error,
+        Some(miyo_rpc::IssueCategory::UnsupportedMethod),
+        "a simulation error must classify as UnsupportedMethod"
+    );
+    let message = check.error_message.as_deref().unwrap_or("");
+    assert!(
+        message.contains("OperationTypeManageData"),
+        "error message must carry the server's simulation error: {message}"
+    );
+}
+
+/// A `simulateTransaction` result with neither `results` nor `error`
+/// is malformed, not a Pass.
+#[tokio::test]
+async fn test_simulate_transaction_missing_results_fails() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+
+    server
+        .mock("GET", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("{}")
+        .create();
+
+    mock_get_network_passphrase(&mut server, "Test SDF Network ; September 2015");
+    mock_simulate_transaction_result(&mut server, json!({"latestLedger": 5933150}));
+
+    let report =
+        DiagnosticReport::run_all(&url, Duration::from_secs(5), Some("simulateTransaction"), 1)
+            .await;
+
+    let check = find_check(&report, "simulateTransaction");
+    assert_eq!(check.status, CheckStatus::Fail);
+    assert_eq!(
+        check.error,
+        Some(miyo_rpc::IssueCategory::MalformedResponse),
+        "missing 'results' must classify as MalformedResponse"
+    );
+}
+
+/// A JSON-RPC error from `simulateTransaction` itself (e.g. `-32601` on
+/// an endpoint that does not implement the method) is a Fail with the
+/// server's error classification preserved.
+#[tokio::test]
+async fn test_simulate_transaction_json_rpc_error_fails() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+
+    server
+        .mock("GET", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("{}")
+        .create();
+
+    mock_get_network_passphrase(&mut server, "Test SDF Network ; September 2015");
+    server
+        .mock("POST", "/")
+        .match_body(mockito::Matcher::Regex(
+            r#""method":"simulateTransaction""#.to_string(),
+        ))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(json_body(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "error": {"code": -32601, "message": "Method not found"}
+        })))
+        .create();
+
+    let report =
+        DiagnosticReport::run_all(&url, Duration::from_secs(5), Some("simulateTransaction"), 1)
+            .await;
+
+    let check = find_check(&report, "simulateTransaction");
+    assert_eq!(check.status, CheckStatus::Fail);
+    assert_eq!(
+        check.error,
+        Some(miyo_rpc::IssueCategory::UnsupportedMethod),
+        "simulateTransaction -32601 must classify as UnsupportedMethod"
+    );
+}
+
+/// `--compare` runs the full built-in set on the second endpoint, so the
+/// new `simulateTransaction` check must be present (and passing) in both
+/// reports that `compare_with` sees — not only in the primary one.
+#[tokio::test]
+async fn test_compare_covers_simulate_transaction() {
+    async fn mock_compare_server() -> (mockito::ServerGuard, String) {
+        let mut server = mockito::Server::new_async().await;
+        let url = server.url();
+        server
+            .mock("GET", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("{}")
+            .create();
+        mock_get_network_passphrase(&mut server, "Test SDF Network ; September 2015");
+        mock_latest_ledger(&mut server, json!(5933150));
+        mock_simulate_transaction_result(&mut server, simulate_success_result());
+        (server, url)
+    }
+
+    let (_server_a, url_a) = mock_compare_server().await;
+    let (_server_b, url_b) = mock_compare_server().await;
+
+    // Same calls `--compare` makes: full built-in set, no method filter.
+    let mut primary = DiagnosticReport::run_all(&url_a, Duration::from_secs(5), None, 1).await;
+    let other = DiagnosticReport::run_all(&url_b, Duration::from_secs(5), None, 1).await;
+
+    for report in [&primary, &other] {
+        let check = find_check(report, "simulateTransaction");
+        assert_eq!(
+            check.status,
+            CheckStatus::Pass,
+            "simulateTransaction must run and pass on the compare endpoint too"
+        );
+    }
+    assert_eq!(primary.checks.len(), 12);
+    assert_eq!(other.checks.len(), 12);
+
+    // Comparing two identical reports must keep simulateTransaction
+    // present and passing, with no divergence flagged on it.
+    primary.compare_with(&other);
+    let check = find_check(&primary, "simulateTransaction");
     assert_eq!(check.status, CheckStatus::Pass);
     let evidence = check.evidence.as_deref().unwrap_or("");
     assert!(

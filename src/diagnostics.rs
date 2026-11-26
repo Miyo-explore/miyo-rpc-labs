@@ -1180,6 +1180,236 @@ impl RpcCheck for GetTransactionCheck {
     }
 }
 
+/// Base64 transaction envelope of a real `InvokeHostFunction`
+/// transaction observed on Testnet (hash
+/// `bbcc753be258d79ad3caa1c66ae150116ab1bc91103b98f7d52a2a4481c38d95`,
+/// ledger ~5933150, 2026-11-26), used as the probe for the
+/// `simulateTransaction` built-in check.
+///
+/// Simulation ignores signatures and sequence numbers, so replaying an
+/// already-applied transaction is valid: the RPC re-executes the
+/// invocation against current ledger state. Verified live twice on
+/// 2026-11-26 (`minResourceFee` 31052, 1 result, no error).
+///
+/// The probe is Testnet-specific: the invoked contract only exists on
+/// Testnet. If the contract is ever archived or the invocation becomes
+/// invalid, the check Fails with the simulation error — replace this
+/// envelope with a fresh single-`InvokeHostFunction` transaction from
+/// Testnet (find one by scanning recent `getTransactions` pages and
+/// replaying candidates through `simulateTransaction` until one
+/// succeeds).
+pub const SIMULATE_TRANSACTION_TESTNET_PROBE_ENVELOPE: &str = "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";
+
+/// Hash of the transaction whose envelope
+/// [`SIMULATE_TRANSACTION_TESTNET_PROBE_ENVELOPE`] replays, for evidence.
+pub const SIMULATE_TRANSACTION_TESTNET_PROBE_TX_HASH: &str =
+    "bbcc753be258d79ad3caa1c66ae150116ab1bc91103b98f7d52a2a4481c38d95";
+
+/// Built-in check for `simulateTransaction`.
+///
+/// `simulateTransaction` needs a transaction envelope, and a diagnostics
+/// check cannot invent a valid Soroban invocation: the envelope must
+/// reference a real contract on the endpoint's network. This check
+/// therefore resolves the network via `getNetwork` and replays the
+/// embedded Testnet probe envelope
+/// ([`SIMULATE_TRANSACTION_TESTNET_PROBE_ENVELOPE`]) — but only on
+/// Testnet. On any other network it Skips with evidence explaining that
+/// the probe is Testnet-specific (no invoke activity was found on
+/// Futurenet in a 5000-ledger scan on 2026-11-26, and no single-invoke
+/// transaction was found on Mainnet in a 250-transaction scan the same
+/// day, so no probe envelope exists for those networks). To simulate on
+/// another network, probe with your own transaction via the arbitrary
+/// method path (`--method simulateTransaction --params`).
+///
+/// A successful simulation (a `results` array, no `error`) is a Pass;
+/// details carry `min_resource_fee`, `results_count`, `latest_ledger`,
+/// and the probe `tx_hash`. A result-level `error` means the probe
+/// invocation no longer simulates — a Fail, since the check cannot prove
+/// the method works. If `getNetwork` fails, the check fails instead of
+/// guessing the network. No user-supplied params are involved —
+/// `--params` is still ignored for built-in methods. Read-only by
+/// design: simulation never submits a transaction (`sendTransaction`
+/// stays out of scope, see `ROADMAP.md`).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SimulateTransactionCheck;
+
+impl RpcCheck for SimulateTransactionCheck {
+    fn name(&self) -> &str {
+        "simulateTransaction"
+    }
+
+    fn run<'a>(
+        &'a self,
+        client: &'a RpcClient,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = CheckResult> + Send + 'a>> {
+        Box::pin(async move {
+            let endpoint = client.sanitized_url();
+            let timestamp = chrono::Utc::now().to_rfc3339();
+            let method = "simulateTransaction";
+
+            // 1. Resolve the network: the probe envelope is only valid
+            // on Testnet.
+            let passphrase = match client.call::<Value>("getNetwork", None).await {
+                Ok((_, result)) => match result.get("passphrase").and_then(Value::as_str) {
+                    Some(passphrase) => passphrase.to_string(),
+                    None => {
+                        return fail_result(
+                            method,
+                            &endpoint,
+                            timestamp,
+                            &MiyoError::MalformedStructure(
+                                "getNetwork result has no 'passphrase' string".to_string(),
+                            ),
+                            "Call getNetwork to determine the endpoint's network before simulating the Testnet probe transaction."
+                                .to_string(),
+                        );
+                    }
+                },
+                Err(e) => {
+                    return fail_result(
+                        method,
+                        &endpoint,
+                        timestamp,
+                        &e,
+                        "Call getNetwork to determine the endpoint's network before simulating the Testnet probe transaction."
+                            .to_string(),
+                    );
+                }
+            };
+            let testnet_passphrase =
+                crate::network::network_passphrase("testnet").expect("testnet is a known network");
+            if passphrase != testnet_passphrase {
+                let network_name = crate::network::NETWORK_PASSPHRASES
+                    .iter()
+                    .find(|(_, p)| *p == passphrase)
+                    .map(|(n, _)| *n)
+                    .unwrap_or("unrecognized");
+                return CheckResult {
+                    name: method.to_string(),
+                    status: CheckStatus::Skip,
+                    timestamp,
+                    duration_ms: None,
+                    http_status: None,
+                    endpoint: endpoint.clone(),
+                    details: None,
+                    error: None,
+                    error_message: None,
+                    evidence: Some(format!(
+                        "Endpoint is on network '{network_name}', not Testnet: the simulateTransaction probe replays a real InvokeHostFunction transaction observed on Testnet (hash {SIMULATE_TRANSACTION_TESTNET_PROBE_TX_HASH}), which references a contract that only exists there. To simulate on this network, probe with your own transaction via --method simulateTransaction --params."
+                    )),
+                };
+            }
+
+            // 2. Replay the embedded Testnet probe envelope.
+            let params = serde_json::json!({
+                "transaction": SIMULATE_TRANSACTION_TESTNET_PROBE_ENVELOPE,
+            });
+            let evidence = format!(
+                "Sent JSON-RPC 2.0 POST to {endpoint} with method 'simulateTransaction' and the embedded Testnet probe transaction (hash {SIMULATE_TRANSACTION_TESTNET_PROBE_TX_HASH}, replayed — simulation ignores signatures and sequence numbers)."
+            );
+            match client.call::<Value>(method, Some(params)).await {
+                Ok((info, result)) => {
+                    // A result-level `error` means the invocation itself
+                    // failed (e.g. the probe contract is gone): the
+                    // method answered, but the check cannot prove it
+                    // simulates a real invocation.
+                    if let Some(error) = result.get("error").and_then(Value::as_str) {
+                        return fail_result(
+                            method,
+                            &endpoint,
+                            timestamp,
+                            &MiyoError::UnsupportedMethod(
+                                method.to_string(),
+                                format!(
+                                    "simulation of the Testnet probe transaction failed: {error}"
+                                ),
+                            ),
+                            evidence,
+                        );
+                    }
+                    let results = match result.get("results").and_then(Value::as_array) {
+                        Some(results) => results,
+                        None => {
+                            return fail_result(
+                                method,
+                                &endpoint,
+                                timestamp,
+                                &MiyoError::MalformedStructure(
+                                    "simulateTransaction result has neither 'results' nor 'error'"
+                                        .to_string(),
+                                ),
+                                evidence,
+                            );
+                        }
+                    };
+
+                    let duration_ms = info.duration.as_millis() as u64;
+                    let mut details = serde_json::Map::new();
+                    details.insert(
+                        "description".to_string(),
+                        Value::String(
+                            "Simulated a real InvokeHostFunction transaction (Testnet probe, replayed)."
+                                .to_string(),
+                        ),
+                    );
+                    details.insert(
+                        "http_status".to_string(),
+                        Value::Number(serde_json::Number::from(info.status)),
+                    );
+                    details.insert(
+                        "tx_hash".to_string(),
+                        Value::String(SIMULATE_TRANSACTION_TESTNET_PROBE_TX_HASH.to_string()),
+                    );
+                    if let Some(fee) = parse_u64_field(&result, "minResourceFee") {
+                        details.insert(
+                            "min_resource_fee".to_string(),
+                            Value::Number(serde_json::Number::from(fee)),
+                        );
+                    }
+                    details.insert(
+                        "results_count".to_string(),
+                        Value::Number(serde_json::Number::from(results.len())),
+                    );
+                    if let Some(latest) = parse_u64_field(&result, "latestLedger") {
+                        details.insert(
+                            "latest_ledger".to_string(),
+                            Value::Number(serde_json::Number::from(latest)),
+                        );
+                    }
+                    if let Some(cost) = result.get("cost") {
+                        if let Some(cpu) = parse_u64_field(cost, "cpuInsns") {
+                            details.insert(
+                                "cost_cpu_insns".to_string(),
+                                Value::Number(serde_json::Number::from(cpu)),
+                            );
+                        }
+                        if let Some(mem) = parse_u64_field(cost, "memBytes") {
+                            details.insert(
+                                "cost_mem_bytes".to_string(),
+                                Value::Number(serde_json::Number::from(mem)),
+                            );
+                        }
+                    }
+
+                    CheckResult {
+                        name: method.to_string(),
+                        status: CheckStatus::Pass,
+                        timestamp,
+                        duration_ms: Some(duration_ms),
+                        http_status: Some(info.status),
+                        endpoint: endpoint.clone(),
+                        details: Some(details),
+                        error: None,
+                        error_message: None,
+                        evidence: Some(evidence),
+                    }
+                }
+                Err(e) => fail_result(method, &endpoint, timestamp, &e, evidence),
+            }
+        })
+    }
+}
+
 /// Check raw HTTP connectivity and status code — independent of JSON-RPC.
 ///
 /// `follow_redirects` mirrors the `RpcClient` policy: follow by default, but
@@ -1368,7 +1598,9 @@ fn fail_result(
 /// and [`GetTransactionsCheck`]); `getLedgerEntries` probes a fixed
 /// synthetic key (see [`GetLedgerEntriesCheck`]); `getFeeStats` sends no
 /// params (see [`GetFeeStatsCheck`]); `getTransaction` fetches the first
-/// transaction of the latest ledger by hash (see [`GetTransactionCheck`]).
+/// transaction of the latest ledger by hash (see [`GetTransactionCheck`]);
+/// `simulateTransaction` replays an embedded Testnet probe transaction
+/// (see [`SimulateTransactionCheck`]).
 pub fn all_checks() -> Vec<Box<dyn RpcCheck + Send + Sync>> {
     vec![
         Box::new(SimpleMethodCheck {
@@ -1397,6 +1629,7 @@ pub fn all_checks() -> Vec<Box<dyn RpcCheck + Send + Sync>> {
         Box::new(GetTransactionsCheck),
         Box::new(GetFeeStatsCheck),
         Box::new(GetTransactionCheck),
+        Box::new(SimulateTransactionCheck),
     ]
 }
 
@@ -1412,6 +1645,7 @@ pub const BUILTIN_METHODS: &[&str] = &[
     "getTransactions",
     "getFeeStats",
     "getTransaction",
+    "simulateTransaction",
 ];
 
 /// Whether `name` refers to one of the built-in checks ([`BUILTIN_METHODS`]).
@@ -2412,10 +2646,11 @@ mod tests {
             "getTransactions",
             "getFeeStats",
             "getTransaction",
+            "simulateTransaction",
         ] {
             assert!(is_builtin_method(m), "{m} should be built-in");
         }
-        for m in ["simulateTransaction", ""] {
+        for m in ["sendTransaction", ""] {
             assert!(!is_builtin_method(m), "{m} should not be built-in");
         }
     }
@@ -2547,7 +2782,7 @@ mod tests {
         assert_eq!(GetEventsCheck.name(), "getEvents");
         assert_eq!(GET_EVENTS_PAGE_LIMIT, 10);
         assert!(is_builtin_method("getEvents"));
-        assert_eq!(BUILTIN_METHODS.len(), 10);
+        assert_eq!(BUILTIN_METHODS.len(), 11);
         let checks = all_checks();
         let names: Vec<&str> = checks.iter().map(|c| c.name()).collect();
         assert_eq!(
@@ -2562,7 +2797,8 @@ mod tests {
                 "getLedgers",
                 "getTransactions",
                 "getFeeStats",
-                "getTransaction"
+                "getTransaction",
+                "simulateTransaction"
             ]
         );
     }
