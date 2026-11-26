@@ -282,8 +282,8 @@ fn test_check_follows_redirects_by_default() {
 fn test_check_no_follow_redirects_reports_302() {
     // With the flag set, the getHealth check fails on the 302 (exit 1)
     // and the 3xx status is reported in the output. The httpConnectivity
-    // check uses its own client and still follows the redirect, so it
-    // passes in both modes.
+    // probe honours the flag too: it reports the redirect as a failure
+    // with the Location, instead of following it.
     let server = redirect_mock_server();
     let url = server.url();
     let output = Command::new(BIN)
@@ -306,6 +306,14 @@ fn test_check_no_follow_redirects_reports_302() {
     assert!(
         stdout.contains("302"),
         "output should report the 302 status, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("httpConnectivity") && stdout.contains("redirect not followed"),
+        "httpConnectivity should report the unfollowed redirect, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("redirect_location"),
+        "httpConnectivity details should carry the redirect target, got: {stdout}"
     );
 }
 

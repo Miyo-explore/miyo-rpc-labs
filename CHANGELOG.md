@@ -24,6 +24,19 @@ This project ships **two decoupled version numbers**:
   Consumers MUST read `schema_version` and MUST ignore fields they do not
   recognize.
 
+## [Unreleased]
+
+### Fixed
+- Testnet network passphrase corrected to `Test SDF Network ; September 2015`
+  (was `Test SDF Network ; February 2023`): `check --expected-network testnet`
+  failed the `getNetwork` validation on the real Testnet even though the
+  endpoint was healthy. Verified against a live `getNetwork` response from
+  soroban-testnet.stellar.org (#32).
+- `httpConnectivity` probe now honours `--no-follow-redirects`: with the flag
+  set, a 3xx response is reported as a redirect failure (with the `Location`
+  in `details`) instead of being silently followed. Without the flag,
+  behaviour is unchanged (#36).
+
 ## [0.3.0] - 2026-11-25
 
 ### Added — Public endpoint report (2026-11-23)

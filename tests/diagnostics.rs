@@ -1181,6 +1181,87 @@ async fn test_redirect_not_followed_with_policy_none() {
     target_mock.assert_async().await;
 }
 
+/// The httpConnectivity probe follows redirects by default: a 302 to a
+/// healthy target passes with the target's status.
+#[tokio::test]
+async fn test_http_connectivity_follows_redirect_by_default() {
+    let mut server = mockito::Server::new_async().await;
+    let target = format!("{}/ok", server.url());
+
+    let redirect = server
+        .mock("GET", "/")
+        .with_status(302)
+        .with_header("location", target.as_str())
+        .create_async()
+        .await;
+
+    let target_mock = server
+        .mock("GET", "/ok")
+        .with_status(200)
+        .create_async()
+        .await;
+
+    let result = miyo_rpc::diagnostics::http_connectivity_check(
+        &server.url(),
+        Duration::from_secs(5),
+        "miyo-rpc/test",
+        true,
+    )
+    .await;
+
+    assert_eq!(result.status, CheckStatus::Pass);
+    assert_eq!(result.http_status, Some(200));
+
+    redirect.assert_async().await;
+    target_mock.assert_async().await;
+}
+
+/// With redirect following disabled, the httpConnectivity probe reports
+/// the 302 as a failure and never contacts the redirect target.
+#[tokio::test]
+async fn test_http_connectivity_redirect_not_followed() {
+    let mut server = mockito::Server::new_async().await;
+    let target = format!("{}/ok", server.url());
+
+    let redirect = server
+        .mock("GET", "/")
+        .with_status(302)
+        .with_header("location", target.as_str())
+        .create_async()
+        .await;
+
+    let target_mock = server
+        .mock("GET", "/ok")
+        .expect(0)
+        .with_status(200)
+        .create_async()
+        .await;
+
+    let result = miyo_rpc::diagnostics::http_connectivity_check(
+        &server.url(),
+        Duration::from_secs(5),
+        "miyo-rpc/test",
+        false,
+    )
+    .await;
+
+    assert_eq!(result.status, CheckStatus::Fail);
+    assert_eq!(result.http_status, Some(302));
+    let message = result.error_message.clone().unwrap_or_default();
+    assert!(
+        message.contains("redirect not followed"),
+        "error should name the redirect: {message}"
+    );
+    let details = result.details.clone().expect("details present");
+    assert_eq!(
+        details.get("redirect_location").and_then(|v| v.as_str()),
+        Some(target.as_str())
+    );
+
+    redirect.assert_async().await;
+    target_mock.assert_async().await;
+}
+
 #[tokio::test]
 async fn test_default_user_agent_sent_on_wire() {
     let mut server = mockito::Server::new_async().await;
@@ -1513,7 +1594,7 @@ fn build_network_report(
 #[test]
 fn test_enforce_expected_network_match() {
     let mut report = build_network_report(
-        Some("Test SDF Network ; February 2023"),
+        Some("Test SDF Network ; September 2015"),
         miyo_rpc::CheckStatus::Pass,
     );
     report.enforce_expected_network(Some("testnet"));

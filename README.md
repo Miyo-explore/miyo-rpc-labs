@@ -71,9 +71,10 @@ method check in isolation (the HTTP connectivity check always runs regardless).
   integer, `retry_after_secs`. The CLI **does not retry** — no automatic retry,
   backoff, or throttling logic exists. Wait for the indicated interval and run
   the command again yourself.
-- `--no-follow-redirects` applies to the JSON-RPC method checks only. The
-  `httpConnectivity` probe builds its own HTTP client and still follows
-  redirects.
+- `--no-follow-redirects` applies to the JSON-RPC method checks and to the
+  `httpConnectivity` probe: with the flag set, a 3xx response is reported as
+  a redirect failure (with the `Location` in `details`) instead of being
+  followed to a different host.
 - Four built-in methods take no parameters. `getEvents` derives its own
   `startLedger` from `getLatestLedger` (the latest ledger, always inside the
   retention window) and fetches a single page of 10 events with no filters;
