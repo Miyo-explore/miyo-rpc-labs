@@ -91,7 +91,7 @@ benchmarking) are documented in the README "Limitations" section.
 
 ## 4. Current State and Gap Analysis
 
-### What exists today (verified in `main` @ fd36e9d — PR #41 merged; latest release `v0.3.1`)
+### What exists today (verified in `main` @ 093d29a — PR #48 merged; latest release `v0.4.0`)
 
 | Capability | Status | Evidence |
 |------------|--------|----------|
@@ -263,6 +263,7 @@ M1–M6 are complete and shipped in `v0.1.0`.
 
 - **Completed (M5):** CI + tag-triggered releases with checksummed binaries;
   `CHANGELOG.md` + versioning policy (`schema_version` decoupled from crate version).
+  Release workflow run 45810641361 (`v0.4.0`, success).
 - **Completed (M6):** multi-platform release matrix (Linux/macOS-Windows),
   per-platform install instructions.
 - **Next (not a milestone):** gather user feedback after the first tagged release.
