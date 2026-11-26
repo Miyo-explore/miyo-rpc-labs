@@ -18,8 +18,8 @@ fn test_version_flag() {
     assert!(output.status.success(), "version command should succeed");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("miyo-rpc 0.3.1"),
-        "version output should contain 'miyo-rpc 0.3.1', got: {stdout}"
+        stdout.contains("miyo-rpc 0.4.0"),
+        "version output should contain 'miyo-rpc 0.4.0', got: {stdout}"
     );
 }
 
