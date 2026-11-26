@@ -26,6 +26,8 @@ This project ships **two decoupled version numbers**:
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-26
+
 ### Added
 - Built-in `getFeeStats` check (#33): sends `getFeeStats` with no params
   and surfaces the Soroban / classic inclusion-fee mode, p95, and
@@ -67,6 +69,14 @@ This project ships **two decoupled version numbers**:
   (`classify_error_shape` in `src/error.rs`). `IssueCategory` values
   and exit codes are unchanged; the full table is documented in
   `docs/checks.md`.
+
+### Added — Public endpoint report (2026-11-26)
+- `docs/ENDPOINT-REPORT-2026-12.md`: live run of all 11 built-in checks
+  (3 runs each) against the public Stellar RPC endpoints — Testnet 12/12,
+  Futurenet 10/12 (2 skips by design), Mainnet 11/12 (1 skip by design).
+  First coverage of `getFeeStats`, `getTransaction`, and
+  `simulateTransaction`. Endpoint URLs verified against the official
+  Stellar docs at run time. Linked from the README.
 
 ## [0.3.1] - 2026-11-26
 

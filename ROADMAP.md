@@ -96,8 +96,8 @@ benchmarking) are documented in the README "Limitations" section.
 | Capability | Status | Evidence |
 |------------|--------|----------|
 | HTTP connectivity check | Implemented | `src/diagnostics.rs:227` |
-| `getHealth`, `getNetwork`, `getLatestLedger`, `getVersionInfo`, `getEvents`, `getLedgerEntries`, `getLedgers`, `getTransactions` method checks | Implemented | `src/diagnostics.rs:524` |
-| Worst-status aggregation (`Fail > Skip > Pass`) | Implemented | `src/diagnostics.rs:34` |
+| `getHealth`, `getNetwork`, `getLatestLedger`, `getVersionInfo`, `getEvents`, `getLedgerEntries`, `getLedgers`, `getTransactions`, `getFeeStats`, `getTransaction`, `simulateTransaction` method checks | Implemented | `src/diagnostics.rs:524` |
+| Worst-status aggregation (`Fail > Warn > Skip > Pass`) | Implemented | `src/diagnostics.rs:34` |
 | Repeated runs (`--runs`, clamped `[1, 10]`) | Implemented | `src/cli.rs:64`, `src/diagnostics.rs:414` |
 | Latency statistics (min/avg/max/run_count) | Implemented | `src/diagnostics.rs:516-532` |
 | Human + JSON output | Implemented | `src/output.rs:100,155` |
@@ -116,6 +116,9 @@ benchmarking) are documented in the README "Limitations" section.
 | `batch --output human` + per-endpoint timeout (docs + tests) | Implemented | `src/output.rs`, `src/main.rs` |
 | `NO_COLOR` + non-TTY color gating in human output | Implemented | `src/output.rs` |
 | Public endpoint diagnostic report (mainnet/testnet/futurenet, 8 methods, 3 runs each) | Implemented | `docs/ENDPOINT-REPORT-2026-11.md` |
+| `Warn` status tier — `getLatestLedger` downgrades on stagnant/inconsistent ledgers across `--runs N` (exit codes unchanged) | Implemented | `src/diagnostics.rs`, `src/output.rs` |
+| Provider error taxonomy — `error_shape` in failed checks' `details` | Implemented | `src/error.rs` |
+| Public endpoint diagnostic report (mainnet/testnet/futurenet, 11 methods, 3 runs each) | Implemented | `docs/ENDPOINT-REPORT-2026-12.md` |
 
 ### Gaps (historical, resolved in v0.1.0)
 
@@ -252,7 +255,7 @@ limitations are tracked in the README "Limitations" section:
 | Hardcoding passphrases couples us to Stellar network constants | Low | Accept — passphrases are public, stable, and rarely rotate. Re-evaluate if a network upgrade changes them. |
 | Unknown network names could silently no-op | Medium | Reject unknown names with exit code `2` rather than ignoring. |
 | Adding new fields mid-trajectory may break consumers | Medium | Gate behind `schema_version` (Milestone 2) after this milestone. |
-| Ledger progression needs a `Warn` tier beyond Pass/Fail/Skip | Medium | Implemented in v0.4.0 (unreleased): `Warn` with precedence Fail > Warn > Skip > Pass; `getLatestLedger` downgrades on stagnant/inconsistent ledgers across `--runs N`; exit codes unchanged. |
+| Ledger progression needs a `Warn` tier beyond Pass/Fail/Skip | Medium | Implemented in v0.4.0: `Warn` with precedence Fail > Warn > Skip > Pass; `getLatestLedger` downgrades on stagnant/inconsistent ledgers across `--runs N`; exit codes unchanged. |
 
 ## 8. Immediate Next Steps
 

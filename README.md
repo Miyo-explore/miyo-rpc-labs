@@ -119,6 +119,7 @@ Full flag reference, exit codes, and output notes:
 - [Examples](docs/examples.md) — human-readable and JSON output examples, URL sanitization.
 - [Batch Mode](docs/batch.md) — diagnosing many endpoints in one invocation.
 - [Development](docs/development.md) — running tests, live validation, reporting issues.
+- [Endpoint Report (2026-12)](docs/ENDPOINT-REPORT-2026-12.md) — live run against public Stellar RPC endpoints.
 - [Endpoint Report (2026-11)](docs/ENDPOINT-REPORT-2026-11.md) — live run against public Stellar RPC endpoints.
 
 ## Contributing

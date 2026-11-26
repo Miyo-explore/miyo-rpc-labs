@@ -7,13 +7,13 @@
 ### Human-readable output (single run)
 
 ```text
-Miyo RPC Labs v0.3.1
+Miyo RPC Labs v0.4.0
 Endpoint: https://soroban-testnet.stellar.org
 
   PASS httpConnectivity  (142ms)
     endpoint_reachable: true
     http_status: 200
-    evidence: Issued HTTP GET to https://soroban-testnet.stellar.org with timeout 15s and User-Agent 'miyo-rpc/0.3.1'.
+    evidence: Issued HTTP GET to https://soroban-testnet.stellar.org with timeout 15s and User-Agent 'miyo-rpc/0.4.0'.
 
   PASS getHealth  (156ms)
     description: "Node health status and ledger window bounds."
@@ -80,7 +80,7 @@ Summary: 9 passed, 0 failed, 0 skipped (9 ran)
 ### Human-readable output (repeated runs)
 
 ```text
-Miyo RPC Labs v0.3.1
+Miyo RPC Labs v0.4.0
 Endpoint: https://soroban-testnet.stellar.org
 
   PASS httpConnectivity  (270ms)
@@ -90,7 +90,7 @@ Endpoint: https://soroban-testnet.stellar.org
     latency_avg_ms: 270.0
     latency_max_ms: 282
     run_count: 3
-    evidence: Issued HTTP GET to https://soroban-testnet.stellar.org with timeout 15s and User-Agent 'miyo-rpc/0.3.1'.
+    evidence: Issued HTTP GET to https://soroban-testnet.stellar.org with timeout 15s and User-Agent 'miyo-rpc/0.4.0'.
 
   PASS getHealth  (270ms)
     description: "Node health status and ledger window bounds."
@@ -127,7 +127,7 @@ read `schema_version` and MUST ignore fields they do not recognize.
 ```json
 {
   "schema_version": "1.0",
-  "tool_version": "0.3.1",
+  "tool_version": "0.4.0",
   "endpoint": "https://soroban-testnet.stellar.org",
   "runs": 1,
   "checks": [
@@ -144,7 +144,7 @@ read `schema_version` and MUST ignore fields they do not recognize.
       },
       "error": null,
       "error_message": null,
-      "evidence": "Issued HTTP GET to https://soroban-testnet.stellar.org with timeout 15s and User-Agent 'miyo-rpc/0.3.1'."
+      "evidence": "Issued HTTP GET to https://soroban-testnet.stellar.org with timeout 15s and User-Agent 'miyo-rpc/0.4.0'."
     },
     {
       "name": "getVersionInfo",
