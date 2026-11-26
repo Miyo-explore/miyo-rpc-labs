@@ -20,6 +20,7 @@ method check in isolation (the HTTP connectivity check always runs regardless).
 | `getTransactions`  | `getTransactions` | Transactions in the latest ledger (one page of 2).                 |
 | `getFeeStats`      | `getFeeStats`     | Fee statistics for recent ledgers (inclusion fee percentiles).     |
 | `getTransaction`   | `getTransaction`  | Single transaction by hash (first transaction in the latest ledger).|
+| `simulateTransaction` | `simulateTransaction` | Simulates a real InvokeHostFunction transaction (Testnet probe, replayed; Skips on other networks). |
 
 ### Status semantics
 
@@ -63,8 +64,17 @@ method check in isolation (the HTTP connectivity check always runs regardless).
   `getLedgerEntries` sends one fixed synthetic probe key — an Account
   `LedgerKey` for the all-zero ed25519 key, which no real wallet owns — and
   needs no `getLatestLedger` round-trip; an empty `entries` array is a Pass
-  (the probe account simply does not exist on that network). The HTTP
-  connectivity probe runs in addition to the ten method checks.
+  (the probe account simply does not exist on that network).
+  `simulateTransaction` resolves the network via `getNetwork` and replays
+  an embedded Testnet probe transaction (a real `InvokeHostFunction`
+  transaction observed on Testnet; simulation ignores signatures and
+  sequence numbers, so replay is valid). It Passes when the simulation
+  returns results, reporting `min_resource_fee`, `results_count`, and
+  `latestLedger`; a result-level `error` is a Fail (the probe invocation
+  no longer simulates). On any network other than Testnet it Skips with
+  evidence — the probe contract only exists on Testnet, so the method
+  cannot be proven there without a native invocation. The HTTP
+  connectivity probe runs in addition to the eleven method checks.
 - JSON-RPC error codes are classified (`-32601`, `-32602`, `-32603`, etc.) but
   no provider-specific error taxonomy is applied.
 - No archive pagination, cross-provider equivalence, or performance

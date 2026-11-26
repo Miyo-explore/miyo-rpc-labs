@@ -37,6 +37,14 @@ This project ships **two decoupled version numbers**:
   hash; details carry `tx_hash`, `status`, `ledger`, `fee_charged`, and
   XDR-presence flags. An empty page is a Skip (no transaction to fetch),
   not a Fail.
+- Built-in `simulateTransaction` check: resolves the network via
+  `getNetwork` and replays an embedded Testnet probe transaction (a real
+  `InvokeHostFunction` transaction observed on Testnet; simulation ignores
+  signatures and sequence numbers, so replay is valid). Passes when the
+  simulation returns results (`min_resource_fee`, `results_count`,
+  `latestLedger` in `details`); a result-level `error` is a Fail. On any
+  network other than Testnet it Skips with evidence — the probe contract
+  only exists on Testnet.
 
 ## [0.3.1] - 2026-11-26
 
