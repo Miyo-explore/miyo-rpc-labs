@@ -24,6 +24,20 @@ This project ships **two decoupled version numbers**:
   Consumers MUST read `schema_version` and MUST ignore fields they do not
   recognize.
 
+## [Unreleased]
+
+### Added
+- Built-in `getFeeStats` check (#33): sends `getFeeStats` with no params
+  and surfaces the Soroban / classic inclusion-fee mode, p95, and
+  transaction count plus `latestLedger` in `details`. A JSON-RPC error
+  (including `-32601`) is a Fail with `UnsupportedMethod`, like the other
+  built-in method checks.
+- Built-in `getTransaction` check: resolves the latest ledger, fetches one
+  page of transactions, and calls `getTransaction` with the first returned
+  hash; details carry `tx_hash`, `status`, `ledger`, `fee_charged`, and
+  XDR-presence flags. An empty page is a Skip (no transaction to fetch),
+  not a Fail.
+
 ## [0.3.1] - 2026-11-26
 
 ### Fixed

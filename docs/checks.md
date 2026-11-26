@@ -18,6 +18,8 @@ method check in isolation (the HTTP connectivity check always runs regardless).
 | `getLedgerEntries` | `getLedgerEntries`| Ledger entries for a fixed probe key (one synthetic Account key).  |
 | `getLedgers`       | `getLedgers`      | Ledger headers from the latest ledger (one page of 2).             |
 | `getTransactions`  | `getTransactions` | Transactions in the latest ledger (one page of 2).                 |
+| `getFeeStats`      | `getFeeStats`     | Fee statistics for recent ledgers (inclusion fee percentiles).     |
+| `getTransaction`   | `getTransaction`  | Single transaction by hash (first transaction in the latest ledger).|
 
 ### Status semantics
 
@@ -45,18 +47,24 @@ method check in isolation (the HTTP connectivity check always runs regardless).
   `httpConnectivity` probe: with the flag set, a 3xx response is reported as
   a redirect failure (with the `Location` in `details`) instead of being
   followed to a different host.
-- Four built-in methods take no parameters. `getEvents` derives its own
+- Five built-in methods take no parameters. `getEvents` derives its own
   `startLedger` from `getLatestLedger` (the latest ledger, always inside the
   retention window) and fetches a single page of 10 events with no filters;
   the response `cursor` is reported as `has_cursor` but never followed.
   `getLedgers` does the same for ledger headers with a single page of 2.
   `getTransactions` does the same for transactions with a single page of 2
   (server default `includeFailed` applies — failed transactions included).
+  `getTransaction` fetches the same one-page result and calls
+  `getTransaction` with the first returned hash; an empty page is a Skip
+  (there is no transaction to fetch), not a Fail. `getFeeStats` sends no
+  params and surfaces the Soroban / classic inclusion-fee mode, p95, and
+  transaction count plus `latestLedger` in `details` — the live response
+  carries no `feeCharged` percentile and no `ledgerCapacityUsage` field.
   `getLedgerEntries` sends one fixed synthetic probe key — an Account
   `LedgerKey` for the all-zero ed25519 key, which no real wallet owns — and
   needs no `getLatestLedger` round-trip; an empty `entries` array is a Pass
   (the probe account simply does not exist on that network). The HTTP
-  connectivity probe runs in addition to the eight method checks.
+  connectivity probe runs in addition to the ten method checks.
 - JSON-RPC error codes are classified (`-32601`, `-32602`, `-32603`, etc.) but
   no provider-specific error taxonomy is applied.
 - No archive pagination, cross-provider equivalence, or performance
