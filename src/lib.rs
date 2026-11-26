@@ -22,11 +22,12 @@ pub use batch::{
 pub use cli::{BatchArgs, CheckArgs, Cli, Commands, OutputFormat};
 pub use client::{RpcClient, RpcClientConfig};
 pub use diagnostics::{
-    is_builtin_method, validate_params, ArbitraryMethodCheck, CheckResult, CheckStatus,
-    DiagnosticReport, IssueCategory, ReportSummary, RpcCheck, BUILTIN_METHODS,
+    contract_code_ledger_key, contract_instance_ledger_key, is_builtin_method, validate_params,
+    ArbitraryMethodCheck, CheckResult, CheckStatus, ContractTtlCheck, DiagnosticReport,
+    IssueCategory, ReportSummary, RpcCheck, TtlCheckConfig, BUILTIN_METHODS, DEFAULT_TTL_THRESHOLD,
 };
 pub use error::{classify_error_shape, ErrorCategory, MiyoError, Result};
-pub use network::{known_networks, network_passphrase};
+pub use network::{decode_contract_id, encode_contract_id, known_networks, network_passphrase};
 pub use output::{
     colors_enabled, format_human, format_human_with_color, format_json, sanitize_url,
 };

@@ -4,7 +4,8 @@
 
 ## Supported Checks
 
-All checks are run by default. Use `--method <NAME>` to run a single JSON-RPC
+All checks are run by default, except `contractTtl`, which only runs
+when a contract is given (`--contract <C...>`). Use `--method <NAME>` to run a single JSON-RPC
 method check in isolation (the HTTP connectivity check always runs regardless).
 
 | Check              | Method            | Description                                                        |
@@ -21,6 +22,7 @@ method check in isolation (the HTTP connectivity check always runs regardless).
 | `getFeeStats`      | `getFeeStats`     | Fee statistics for recent ledgers (inclusion fee percentiles).     |
 | `getTransaction`   | `getTransaction`  | Single transaction by hash (first transaction in the latest ledger).|
 | `simulateTransaction` | `simulateTransaction` | Simulates a real InvokeHostFunction transaction (Testnet probe, replayed; Skips on other networks). |
+| `contractTtl` | `getLedgerEntries` | Remaining ledgers until a contract's instance and code entries expire. Only runs with `--contract <C...>`; Warns at/below `--ttl-threshold` (default 17280). |
 
 ### Status semantics
 
@@ -40,9 +42,14 @@ method check in isolation (the HTTP connectivity check always runs regardless).
   interval also read as "unchanged" — a `Warn` on a healthy endpoint is
   expected in that case, and is a prompt to look closer, not proof the
   endpoint is frozen. Warn is counted in `ran` but not in `passed`, and
-  never changes the exit code — only `Fail` exits `1`.
+  never changes the exit code — only `Fail` exits `1`. `contractTtl`
+  reports `Warn` instead of `Pass` when the smallest remaining value
+  (instance or code) is at or below `--ttl-threshold` (default 17280
+  ledgers, ≈ 1 day); the boundary is inclusive.
 - **Skip** — the check was not attempted (for example, because `--method`
-  selected a different check).
+  selected a different check). `contractTtl` Skips when it was explicitly
+  requested (`--method contractTtl`) but no `--contract` was given; with
+  no `--contract` at all it is absent from the report entirely.
 
 Aggregation precedence across runs is **Fail > Warn > Skip > Pass**: a
 `Fail` in any run is never hidden by another run's `Warn`/`Skip`/`Pass`,
@@ -125,7 +132,26 @@ client-side validation failure, not a provider error shape.
   no longer simulates). On any network other than Testnet it Skips with
   evidence — the probe contract only exists on Testnet, so the method
   cannot be proven there without a native invocation. The HTTP
-  connectivity probe runs in addition to the eleven method checks.
+  connectivity probe runs in addition to the twelve method checks
+  (eleven unconditional, plus `contractTtl` when `--contract` is given).
+- `contractTtl` reads a contract's instance entry and its Wasm code entry
+  via `getLedgerEntries` and reports remaining ledgers until expiry:
+  each entry's `liveUntilLedgerSeq` minus the latest ledger sequence
+  (resolved via `getLatestLedger`). The instance key is a `ContractData`
+  `LedgerKey` for the contract address with the
+  `LedgerKeyContractInstance` key and `PERSISTENT` durability; the code
+  key is a `ContractCode` `LedgerKey` for the Wasm hash parsed out of the
+  instance entry's executable. A missing instance entry is a Fail (the
+  contract is archived, expired, or never deployed), and so is a missing
+  code entry for a Wasm contract. A Stellar Asset Contract (or an
+  external reference) has no Wasm and therefore no code entry by design:
+  the check then reports `code_remaining_ledgers` as `null` and judges by
+  the instance entry alone. `details` carry `instance_remaining_ledgers`,
+  `code_remaining_ledgers`, `latest_ledger`, `instance_live_ledger`,
+  `code_live_ledger`, `code_executable`, `code_wasm_hash`, and
+  `ttl_threshold`. The contract ID is validated before any request is
+  made (a malformed `C...` strkey exits `2`); `--method contractTtl`
+  without `--contract` also exits `2`.
 - JSON-RPC error codes are classified (`-32601`, `-32602`, `-32603`, etc.) but
   no provider-specific error taxonomy is applied.
 - No archive pagination, cross-provider equivalence, or performance

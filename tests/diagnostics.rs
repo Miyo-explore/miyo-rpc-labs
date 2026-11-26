@@ -5,7 +5,7 @@
 
 use miyo_rpc::{
     sanitize_url, BatchArgs, CheckStatus, DiagnosticReport, OutputFormat, RpcClient,
-    RpcClientConfig,
+    RpcClientConfig, TtlCheckConfig,
 };
 use serde_json::{json, Value};
 use std::time::Duration;
@@ -3403,8 +3403,9 @@ fn test_is_builtin_method_public() {
     assert!(miyo_rpc::is_builtin_method("getFeeStats"));
     assert!(miyo_rpc::is_builtin_method("getTransaction"));
     assert!(miyo_rpc::is_builtin_method("simulateTransaction"));
+    assert!(miyo_rpc::is_builtin_method("contractTtl"));
     assert!(!miyo_rpc::is_builtin_method("sendTransaction"));
-    assert_eq!(miyo_rpc::BUILTIN_METHODS.len(), 11);
+    assert_eq!(miyo_rpc::BUILTIN_METHODS.len(), 12);
 }
 
 #[test]
@@ -6043,5 +6044,425 @@ async fn test_error_shape_unsupported_method_simulation() {
     assert_eq!(
         error_shape_of(&report, "simulateTransaction").as_deref(),
         Some("unsupported_method")
+    );
+}
+
+// ────────────────────────────
+// contractTtl built-in check
+// ────────────────────────────
+
+/// Real Testnet contracts, verified live 2026-11-27 via `getLedgerEntries`:
+/// a Wasm contract (with a code entry) and the native XLM Stellar Asset
+/// Contract (no Wasm, so no code entry by design).
+const TTL_WASM_CONTRACT: &str = "CBSOWXRDBW4BZ2WYGQWJN25U24BDXOTLAS4U7NURAMDTTBGB72CNSP5Y";
+const TTL_SAC_CONTRACT: &str = "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC";
+
+/// Base64 XDR ledger keys for the contracts above, computed independently
+/// (Python, from the XDR spec) — not via the implementation under test.
+/// The SAC instance key is the exact value soroban-testnet.stellar.org
+/// echoed back for that contract's instance entry.
+const TTL_WASM_INSTANCE_KEY: &str =
+    "AAAABgAAAAFk614jDbgc6tg0LJbrtNcCO7prBLlPtpEDBzmEwf6E2QAAABQAAAAB";
+const TTL_WASM_CODE_KEY: &str = "AAAAB+Mro/P9SpcyOhrlGxDGwDJq/thQqX1rgRpQ6NIOZ5yp";
+const TTL_SAC_INSTANCE_KEY: &str =
+    "AAAABgAAAAHXkotywnA8z+r365/0701QSlWouXn8m0UOoshCtNHOYQAAABQAAAAB";
+
+/// Base64 `LedgerEntryData` XDR for the contracts' instance entries, built
+/// from the documented layout (discriminant 6, empty ext, CONTRACT address,
+/// LEDGER_KEY_CONTRACT_INSTANCE, PERSISTENT, CONTRACT_INSTANCE, then the
+/// executable: WASM + hash, or STELLAR_ASSET).
+const TTL_WASM_INSTANCE_XDR: &str =
+    "AAAABgAAAAAAAAABZOteIw24HOrYNCyW67TXAju6awS5T7aRAwc5hMH+hNkAAAAUAAAAAQAAABMAAAAA4yuj8/1KlzI6GuUbEMbAMmr+2FCpfWuBGlDo0g5nnKk=";
+const TTL_SAC_INSTANCE_XDR: &str =
+    "AAAABgAAAAAAAAAB15KLcsJwPM/q9+uf9O9NUEpVqLl5/JtFDqLIQrTRzmEAAAAUAAAAAQAAABMAAAAB";
+
+/// The Wasm hash of the WASM contract above (from its instance entry,
+/// verified live 2026-11-27).
+const TTL_WASM_HASH_HEX: &str = "e32ba3f3fd4a97323a1ae51b10c6c0326afed850a97d6b811a50e8d20e679ca9";
+
+/// Latest ledger used by all TTL fixtures.
+const TTL_LATEST_LEDGER: u64 = 5_940_443;
+
+/// Mock a `getLedgerEntries` call for exactly one ledger key, returning the
+/// given entries. The exact-body matcher proves the check sends the key
+/// the spec requires — a wrong key construction fails the mock.
+fn mock_get_ledger_entries_key(
+    server: &mut mockito::Server,
+    key: &str,
+    entries: Value,
+) -> mockito::Mock {
+    server
+        .mock("POST", "/")
+        .match_body(mockito::Matcher::Json(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getLedgerEntries",
+            "params": {"keys": [key]}
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(json_body(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {"entries": entries, "latestLedger": TTL_LATEST_LEDGER}
+        })))
+        .create()
+}
+
+/// One `getLedgerEntries` entry: the key the RPC echoed, the entry's XDR,
+/// and its expiry ledger. (The check does not parse a code entry's XDR,
+/// so code fixtures use a placeholder value.)
+fn ledger_entry(key: &str, xdr: &str, live_until: u64) -> Value {
+    json!({
+        "key": key,
+        "xdr": xdr,
+        "lastModifiedLedgerSeq": 5_940_000,
+        "liveUntilLedgerSeq": live_until,
+    })
+}
+
+/// Run only the `contractTtl` check against the mock server, for the given
+/// contract strkey and threshold.
+async fn run_contract_ttl(url: &str, contract: &str, threshold: u64) -> DiagnosticReport {
+    let contract_id = miyo_rpc::decode_contract_id(contract).expect("test contract strkey");
+    DiagnosticReport::run_all_with_config_and_contract(
+        url,
+        RpcClientConfig::new(Duration::from_secs(5)),
+        Some("contractTtl"),
+        1,
+        Some(TtlCheckConfig {
+            contract_id,
+            threshold,
+        }),
+    )
+    .await
+}
+
+/// The Wasm contract's live values (2026-11-27): instance live 6404639
+/// (464196 remaining), code live 6402384 (461941 remaining) at latest
+/// 5940443 — both far above the 17280 default threshold, so Pass.
+#[tokio::test]
+async fn test_contract_ttl_pass_wasm() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+
+    server
+        .mock("GET", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("{}")
+        .create();
+
+    mock_latest_ledger(&mut server, json!(TTL_LATEST_LEDGER));
+    let instance_mock = mock_get_ledger_entries_key(
+        &mut server,
+        TTL_WASM_INSTANCE_KEY,
+        json!([ledger_entry(
+            TTL_WASM_INSTANCE_KEY,
+            TTL_WASM_INSTANCE_XDR,
+            6_404_639
+        )]),
+    );
+    let code_mock = mock_get_ledger_entries_key(
+        &mut server,
+        TTL_WASM_CODE_KEY,
+        json!([ledger_entry(TTL_WASM_CODE_KEY, "AAAAAA==", 6_402_384)]),
+    );
+
+    let report = run_contract_ttl(&url, TTL_WASM_CONTRACT, 17_280).await;
+
+    let check = find_check(&report, "contractTtl");
+    assert_eq!(check.status, CheckStatus::Pass);
+    let details = check.details.as_ref().expect("contractTtl details");
+    assert_eq!(
+        details.get("instance_remaining_ledgers"),
+        Some(&Value::from(464_196u64))
+    );
+    assert_eq!(
+        details.get("code_remaining_ledgers"),
+        Some(&Value::from(461_941u64))
+    );
+    assert_eq!(
+        details.get("latest_ledger"),
+        Some(&Value::from(TTL_LATEST_LEDGER))
+    );
+    assert_eq!(
+        details.get("code_executable"),
+        Some(&Value::String("wasm".to_string()))
+    );
+    assert_eq!(
+        details.get("code_wasm_hash"),
+        Some(&Value::String(TTL_WASM_HASH_HEX.to_string()))
+    );
+    assert_eq!(details.get("ttl_threshold"), Some(&Value::from(17_280u64)));
+    assert_eq!(report.summary.passed, 2); // httpConnectivity + contractTtl
+    assert_eq!(report.summary.warned, 0);
+    assert_eq!(report.summary.skipped, 11);
+
+    // The exact-body matchers prove both keys were sent as specified.
+    instance_mock.assert_async().await;
+    code_mock.assert_async().await;
+}
+
+/// Remaining ledgers below the threshold warn.
+#[tokio::test]
+async fn test_contract_ttl_warn_below_threshold() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+
+    server
+        .mock("GET", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("{}")
+        .create();
+
+    mock_latest_ledger(&mut server, json!(TTL_LATEST_LEDGER));
+    mock_get_ledger_entries_key(
+        &mut server,
+        TTL_WASM_INSTANCE_KEY,
+        json!([ledger_entry(
+            TTL_WASM_INSTANCE_KEY,
+            TTL_WASM_INSTANCE_XDR,
+            TTL_LATEST_LEDGER + 100
+        )]),
+    );
+    mock_get_ledger_entries_key(
+        &mut server,
+        TTL_WASM_CODE_KEY,
+        json!([ledger_entry(
+            TTL_WASM_CODE_KEY,
+            "AAAAAA==",
+            TTL_LATEST_LEDGER + 500
+        )]),
+    );
+
+    let report = run_contract_ttl(&url, TTL_WASM_CONTRACT, 17_280).await;
+
+    let check = find_check(&report, "contractTtl");
+    assert_eq!(check.status, CheckStatus::Warn);
+    let details = check.details.as_ref().expect("contractTtl details");
+    assert_eq!(
+        details.get("instance_remaining_ledgers"),
+        Some(&Value::from(100u64))
+    );
+    assert_eq!(
+        details.get("code_remaining_ledgers"),
+        Some(&Value::from(500u64))
+    );
+    // Warn counts in `ran`, not in `passed`; the exit code is unchanged.
+    assert_eq!(report.summary.warned, 1);
+    assert_eq!(report.summary.passed, 1); // httpConnectivity only
+}
+
+/// The threshold boundary is inclusive: remaining == threshold warns.
+#[tokio::test]
+async fn test_contract_ttl_warn_at_threshold() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+
+    server
+        .mock("GET", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("{}")
+        .create();
+
+    mock_latest_ledger(&mut server, json!(TTL_LATEST_LEDGER));
+    mock_get_ledger_entries_key(
+        &mut server,
+        TTL_WASM_INSTANCE_KEY,
+        json!([ledger_entry(
+            TTL_WASM_INSTANCE_KEY,
+            TTL_WASM_INSTANCE_XDR,
+            TTL_LATEST_LEDGER + 17_280
+        )]),
+    );
+    mock_get_ledger_entries_key(
+        &mut server,
+        TTL_WASM_CODE_KEY,
+        json!([ledger_entry(
+            TTL_WASM_CODE_KEY,
+            "AAAAAA==",
+            TTL_LATEST_LEDGER + 20_000
+        )]),
+    );
+
+    let report = run_contract_ttl(&url, TTL_WASM_CONTRACT, 17_280).await;
+
+    let check = find_check(&report, "contractTtl");
+    assert_eq!(check.status, CheckStatus::Warn);
+    let details = check.details.as_ref().expect("contractTtl details");
+    assert_eq!(
+        details.get("instance_remaining_ledgers"),
+        Some(&Value::from(17_280u64))
+    );
+    assert_eq!(report.summary.warned, 1);
+}
+
+/// A Stellar Asset Contract has no Wasm and therefore no code entry:
+/// the check passes on the instance entry alone and reports the code
+/// remaining as null. Only one `getLedgerEntries` call is made.
+#[tokio::test]
+async fn test_contract_ttl_sac_no_code_entry_passes() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+
+    server
+        .mock("GET", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("{}")
+        .create();
+
+    mock_latest_ledger(&mut server, json!(TTL_LATEST_LEDGER));
+    let instance_mock = mock_get_ledger_entries_key(
+        &mut server,
+        TTL_SAC_INSTANCE_KEY,
+        json!([ledger_entry(
+            TTL_SAC_INSTANCE_KEY,
+            TTL_SAC_INSTANCE_XDR,
+            8_837_665
+        )]),
+    );
+
+    let report = run_contract_ttl(&url, TTL_SAC_CONTRACT, 17_280).await;
+
+    let check = find_check(&report, "contractTtl");
+    assert_eq!(check.status, CheckStatus::Pass);
+    let details = check.details.as_ref().expect("contractTtl details");
+    assert_eq!(
+        details.get("instance_remaining_ledgers"),
+        Some(&Value::from(2_897_222u64))
+    );
+    assert_eq!(details.get("code_remaining_ledgers"), Some(&Value::Null));
+    assert_eq!(
+        details.get("code_executable"),
+        Some(&Value::String("stellar_asset".to_string()))
+    );
+
+    instance_mock.assert_async().await;
+}
+
+/// A missing instance entry (archived / expired / never deployed) fails
+/// with the `missing_field` shape — it is a finding, not a Skip.
+#[tokio::test]
+async fn test_contract_ttl_missing_instance_fails() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+
+    server
+        .mock("GET", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("{}")
+        .create();
+
+    mock_latest_ledger(&mut server, json!(TTL_LATEST_LEDGER));
+    mock_get_ledger_entries_key(&mut server, TTL_WASM_INSTANCE_KEY, json!([]));
+
+    let report = run_contract_ttl(&url, TTL_WASM_CONTRACT, 17_280).await;
+
+    let check = find_check(&report, "contractTtl");
+    assert_eq!(check.status, CheckStatus::Fail);
+    assert_eq!(
+        error_shape_of(&report, "contractTtl").as_deref(),
+        Some("missing_field")
+    );
+    assert_eq!(report.summary.failed, 1);
+}
+
+/// A Wasm contract whose code entry is missing fails as well.
+#[tokio::test]
+async fn test_contract_ttl_missing_code_fails() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+
+    server
+        .mock("GET", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("{}")
+        .create();
+
+    mock_latest_ledger(&mut server, json!(TTL_LATEST_LEDGER));
+    mock_get_ledger_entries_key(
+        &mut server,
+        TTL_WASM_INSTANCE_KEY,
+        json!([ledger_entry(
+            TTL_WASM_INSTANCE_KEY,
+            TTL_WASM_INSTANCE_XDR,
+            TTL_LATEST_LEDGER + 100_000
+        )]),
+    );
+    mock_get_ledger_entries_key(&mut server, TTL_WASM_CODE_KEY, json!([]));
+
+    let report = run_contract_ttl(&url, TTL_WASM_CONTRACT, 17_280).await;
+
+    let check = find_check(&report, "contractTtl");
+    assert_eq!(check.status, CheckStatus::Fail);
+    assert_eq!(
+        error_shape_of(&report, "contractTtl").as_deref(),
+        Some("missing_field")
+    );
+}
+
+/// With no `--contract`, the check is present when explicitly requested
+/// but reports `Skip` with evidence pointing at the flag.
+#[tokio::test]
+async fn test_contract_ttl_skip_without_contract() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+
+    server
+        .mock("GET", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("{}")
+        .create();
+
+    let report = DiagnosticReport::run_all_with_config_and_contract(
+        &url,
+        RpcClientConfig::new(Duration::from_secs(5)),
+        Some("contractTtl"),
+        1,
+        None,
+    )
+    .await;
+
+    let check = find_check(&report, "contractTtl");
+    assert_eq!(check.status, CheckStatus::Skip);
+    assert!(
+        check
+            .evidence
+            .as_deref()
+            .unwrap_or("")
+            .contains("--contract"),
+        "skip evidence must name the --contract flag"
+    );
+    assert_eq!(report.summary.passed, 1); // httpConnectivity only
+    assert_eq!(report.summary.skipped, 12);
+}
+
+/// Default runs (no `--contract`) keep exactly the 12 checks they had
+/// before the TTL check existed.
+#[tokio::test]
+async fn test_contract_ttl_absent_from_default_run() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+
+    server
+        .mock("GET", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("{}")
+        .create();
+
+    let report = DiagnosticReport::run_all(&url, Duration::from_secs(5), None, 1).await;
+
+    assert_eq!(report.checks.len(), 12);
+    assert!(
+        report.checks.iter().all(|c| c.name != "contractTtl"),
+        "default run must not include contractTtl"
     );
 }
