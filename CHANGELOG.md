@@ -55,6 +55,18 @@ This project ships **two decoupled version numbers**:
   only read string-form sequences, but live endpoints return the sequence
   as a JSON number — the analysis was a silent no-op on real endpoints
   and now accepts both forms (same fix in `--compare` ledger divergence).
+- Provider error taxonomy (#35): every failed check now carries an
+  `error_shape` in its `details` (human and JSON), naming *how* the
+  provider failed — `rate_limited`, `html_error_page`,
+  `http_server_error`, `http_client_error`, `method_not_found` (-32601),
+  `invalid_params` (-32602), `internal_error` (-32603),
+  `json_rpc_error`, `non_json_response`, `malformed_response`,
+  `oversized_response`, `unsupported_method`, `missing_field`,
+  `transport_error`, `timeout`, `configuration_error`,
+  `unknown_error`. The mapping is table-driven on the error code
+  (`classify_error_shape` in `src/error.rs`). `IssueCategory` values
+  and exit codes are unchanged; the full table is documented in
+  `docs/checks.md`.
 
 ## [0.3.1] - 2026-11-26
 

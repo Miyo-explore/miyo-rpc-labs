@@ -1585,24 +1585,29 @@ fn fail_result(
     let message = err.to_string();
     let category = IssueCategory::from_error(err);
 
-    // For a rate-limited response, surface the server-supplied `Retry-After`
-    // verbatim plus its numeric seconds form when it parses as an integer.
-    // Nothing is synthesised when the header is absent or non-numeric.
-    let details = match err {
-        MiyoError::HttpError {
-            status: 429,
-            retry_after: Some(raw),
-            ..
-        } => {
-            let mut d = serde_json::Map::new();
-            d.insert("retry_after".to_string(), Value::String(raw.clone()));
-            if let Ok(secs) = raw.trim().parse::<u64>() {
-                d.insert("retry_after_secs".to_string(), Value::from(secs));
-            }
-            Some(d)
+    // Every failure carries its provider error shape in `details`
+    // (see `classify_error_shape`): the coarse `IssueCategory` says
+    // *what kind* of failure it is, the shape says *how* the provider
+    // failed. For a rate-limited response, the server-supplied
+    // `Retry-After` is also surfaced verbatim plus its numeric seconds
+    // form when it parses as an integer. Nothing is synthesised when
+    // the header is absent or non-numeric.
+    let mut details = serde_json::Map::new();
+    details.insert(
+        "error_shape".to_string(),
+        Value::String(crate::error::classify_error_shape(err).to_string()),
+    );
+    if let MiyoError::HttpError {
+        status: 429,
+        retry_after: Some(raw),
+        ..
+    } = err
+    {
+        details.insert("retry_after".to_string(), Value::String(raw.clone()));
+        if let Ok(secs) = raw.trim().parse::<u64>() {
+            details.insert("retry_after_secs".to_string(), Value::from(secs));
         }
-        _ => None,
-    };
+    }
 
     CheckResult {
         name: name.to_string(),
@@ -1611,7 +1616,7 @@ fn fail_result(
         duration_ms: None,
         http_status: None,
         endpoint: endpoint.to_string(),
-        details,
+        details: Some(details),
         error: Some(category),
         error_message: Some(message),
         evidence: Some(evidence),

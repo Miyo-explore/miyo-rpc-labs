@@ -25,7 +25,7 @@ pub use diagnostics::{
     is_builtin_method, validate_params, ArbitraryMethodCheck, CheckResult, CheckStatus,
     DiagnosticReport, IssueCategory, ReportSummary, RpcCheck, BUILTIN_METHODS,
 };
-pub use error::{ErrorCategory, MiyoError, Result};
+pub use error::{classify_error_shape, ErrorCategory, MiyoError, Result};
 pub use network::{known_networks, network_passphrase};
 pub use output::{
     colors_enabled, format_human, format_human_with_color, format_json, sanitize_url,

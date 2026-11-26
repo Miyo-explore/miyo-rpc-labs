@@ -49,6 +49,41 @@ Aggregation precedence across runs is **Fail > Warn > Skip > Pass**: a
 and a `Warn` is never hidden by `Skip`/`Pass` — but a `Warn` never
 outranks a `Fail`.
 
+### Error shapes
+
+Every failed check carries an `error_shape` in its `details` (human and
+JSON output). The shape is finer than the coarse `IssueCategory`: two
+failures in the same category can have different shapes, so a reader can
+tell *how* the provider failed without opening the raw response. The
+mapping is table-driven on the error code (`classify_error_shape` in
+`src/error.rs`); it classifies shapes, it does not fingerprint providers.
+`IssueCategory` values and exit codes are unchanged.
+
+| `error_shape` | When it appears |
+| --- | --- |
+| `rate_limited` | HTTP 429 (with `retry_after` / `retry_after_secs` in `details` when the server sends `Retry-After`) |
+| `html_error_page` | HTTP error whose body is an HTML page (e.g. a Cloudflare-style error page) |
+| `http_server_error` | HTTP 5xx with a non-HTML body |
+| `http_client_error` | HTTP 4xx other than 429, with a non-HTML body |
+| `http_error` | Any other non-200 HTTP status |
+| `method_not_found` | JSON-RPC `-32601` |
+| `invalid_params` | JSON-RPC `-32602` |
+| `internal_error` | JSON-RPC `-32603` |
+| `json_rpc_error` | Any other JSON-RPC error code |
+| `non_json_response` | HTTP 200 with a body that is not JSON (the raw body is never shown) |
+| `malformed_response` | Well-formed JSON that is not a valid JSON-RPC response (missing `jsonrpc`, `result`, or error `code`) |
+| `oversized_response` | Response body exceeds `--max-response-bytes` |
+| `unsupported_method` | The method answered but the result carries an error (e.g. `simulateTransaction` result-level `error`) |
+| `missing_field` | A required field is absent from an otherwise valid response |
+| `transport_error` | Connection / read failure (DNS, refused, reset) |
+| `timeout` | The request exceeded `--timeout` |
+| `configuration_error` | The client could not even be built (e.g. an unsupported URL scheme) |
+| `unknown_error` | Any other failure |
+
+One exception: the `--expected-network` mismatch downgrades a passing
+`getNetwork` check to `Fail` without an `error_shape` — that is a
+client-side validation failure, not a provider error shape.
+
 ### Limitations
 
 - HTTP connectivity is measured with a plain `GET` request. Stellar JSON-RPC
