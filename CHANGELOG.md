@@ -45,6 +45,16 @@ This project ships **two decoupled version numbers**:
   `latestLedger` in `details`); a result-level `error` is a Fail. On any
   network other than Testnet it Skips with evidence — the probe contract
   only exists on Testnet.
+- `Warn` status tier (#34): with `--runs N` (N ≥ 2), `getLatestLedger`
+  reports `Warn` instead of `Pass` when the ledger is stagnant (same
+  sequence and hash across runs) or inconsistent (same sequence, changing
+  hash). Warn is surfaced in human output (magenta `WARN`) and JSON
+  (`"warn"` + a `warned` summary count), counted in `ran` but not in
+  `passed`, and never changes the exit code. Aggregation precedence is
+  Fail > Warn > Skip > Pass. Fixed alongside: the ledger-health analysis
+  only read string-form sequences, but live endpoints return the sequence
+  as a JSON number — the analysis was a silent no-op on real endpoints
+  and now accepts both forms (same fix in `--compare` ledger divergence).
 
 ## [0.3.1] - 2026-11-26
 

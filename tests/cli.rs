@@ -663,3 +663,68 @@ fn test_batch_timeout_secs_flag_accepted() {
         "--timeout-secs should be accepted (exit 1 from failed checks, not 2)"
     );
 }
+
+#[test]
+fn test_warn_only_run_exits_zero() {
+    // #34: a Warn-only run must exit 0 — only Fail exits 1. The mock
+    // endpoint returns the same ledger sequence + hash on every call,
+    // so `getLatestLedger` Warns (stagnant) instead of Passing.
+    let mut server = mockito::Server::new();
+    let url = server.url();
+
+    server
+        .mock("GET", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("{}")
+        .create();
+
+    server
+        .mock("POST", "/")
+        .match_body(mockito::Matcher::Regex(
+            r#""method":"getLatestLedger""#.to_string(),
+        ))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            serde_json::to_string(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "id": "9f3308826b666c11df41693b17eddbb68aea9758be0f67fd5df81f6cf5c48984",
+                    "sequence": 5841158,
+                    "closeTime": "1765223032"
+                }
+            }))
+            .expect("valid JSON"),
+        )
+        .create();
+
+    let output = Command::new(BIN)
+        .args([
+            "check",
+            "--url",
+            &url,
+            "--method",
+            "getLatestLedger",
+            "--runs",
+            "2",
+        ])
+        .output()
+        .expect("failed to execute miyo-rpc check");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "Warn-only run must exit 0, got {:?}: {stdout}",
+        output.status.code()
+    );
+    assert!(
+        stdout.contains("WARN"),
+        "human output must show the WARN status: {stdout}"
+    );
+    assert!(
+        stdout.contains("1 warned"),
+        "summary line must count the warning: {stdout}"
+    );
+}

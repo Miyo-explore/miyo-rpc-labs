@@ -22,6 +22,12 @@ pub enum CheckStatus {
     Pass,
     /// The check completed but the endpoint did not behave as expected.
     Fail,
+    /// The check completed, but the result is suspicious enough to flag
+    /// without failing the run: the endpoint answered, yet the observed
+    /// state (e.g. a ledger that does not advance across `--runs N`)
+    /// suggests it is stale or inconsistent. Warn never changes the exit
+    /// code — only `Fail` does.
+    Warn,
     /// The check could not be performed (e.g., a prior check failed and this
     /// check depends on it, or the method is not applicable).
     Skip,
@@ -29,11 +35,15 @@ pub enum CheckStatus {
 
 /// Determine the worst (highest-precedence) status from a set of results.
 ///
-/// Precedence: Fail > Skip > Pass. A `Fail` in any run must never be hidden
-/// by `Skip` or `Pass` in another run.
+/// Precedence: Fail > Warn > Skip > Pass. A `Fail` in any run must never be
+/// hidden by `Warn`, `Skip`, or `Pass` in another run, and a `Warn` must
+/// never be hidden by `Skip` or `Pass` — but a `Warn` is not a failure, so
+/// it never outranks `Fail` and never changes the exit code.
 pub fn worst_status(statuses: &[CheckStatus]) -> CheckStatus {
     if statuses.contains(&CheckStatus::Fail) {
         CheckStatus::Fail
+    } else if statuses.contains(&CheckStatus::Warn) {
+        CheckStatus::Warn
     } else if statuses.contains(&CheckStatus::Skip) {
         CheckStatus::Skip
     } else {
@@ -143,6 +153,9 @@ pub struct ReportSummary {
     pub passed: u32,
     /// Number of failing checks.
     pub failed: u32,
+    /// Number of checks that passed with a warning (counted in `ran`,
+    /// not in `passed`). Warn never changes the exit code.
+    pub warned: u32,
     /// Number of skipped checks.
     pub skipped: u32,
     /// Total number of diagnostic runs.
@@ -188,12 +201,27 @@ impl RpcCheck for SimpleMethodCheck {
                     }
 
                     // Include the full result for the JSON report, but only
-                    // for fields that are short and non-sensitive.
+                    // for fields that are short and non-sensitive. A huge
+                    // result must not bloat the report — and must not drop
+                    // the short fields along with the blobs: getLatestLedger
+                    // returns hundred-kilobyte headerXdr/metadataXdr, and
+                    // an all-or-nothing size cap used to discard the whole
+                    // result, leaving details without `id` — which made
+                    // the ledger-health analysis (sequence + hash) blind
+                    // on live endpoints.
                     let result_str = serde_json::to_string(&result);
                     if let Ok(s) = &result_str {
-                        if s.len() < 2048 {
-                            if let Ok(Value::Object(map)) = serde_json::from_str::<Value>(s) {
-                                for (k, v) in map {
+                        if let Ok(Value::Object(map)) = serde_json::from_str::<Value>(s) {
+                            for (k, v) in map {
+                                let short = if s.len() < 2048 {
+                                    true
+                                } else {
+                                    serde_json::to_string(&v)
+                                        .map(|t| t.len())
+                                        .unwrap_or(usize::MAX)
+                                        < 256
+                                };
+                                if short {
                                     details.entry(k).or_insert(v);
                                 }
                             }
@@ -2029,6 +2057,7 @@ fn summarize(checks: &[CheckResult], runs: usize) -> ReportSummary {
         ran: 0,
         passed: 0,
         failed: 0,
+        warned: 0,
         skipped: 0,
         total_runs: runs as u32,
     };
@@ -2042,6 +2071,10 @@ fn summarize(checks: &[CheckResult], runs: usize) -> ReportSummary {
                 s.ran += 1;
                 s.failed += 1;
             }
+            CheckStatus::Warn => {
+                s.ran += 1;
+                s.warned += 1;
+            }
             CheckStatus::Skip => s.skipped += 1,
         }
     }
@@ -2050,7 +2083,7 @@ fn summarize(checks: &[CheckResult], runs: usize) -> ReportSummary {
 
 /// Aggregate results from multiple runs into a single summary per check.
 ///
-/// The status of each check is the "worst" across all runs (Fail > Skip > Pass),
+/// The status of each check is the "worst" across all runs (Fail > Warn > Skip > Pass),
 /// and `duration_ms` becomes the average. When more than one run was performed,
 /// latency statistics (min/max/avg) and `run_count` are added to `details`.
 fn aggregate(per_run: &[Vec<CheckResult>]) -> Vec<CheckResult> {
@@ -2068,7 +2101,7 @@ fn aggregate(per_run: &[Vec<CheckResult>]) -> Vec<CheckResult> {
             .collect();
         let first = *hits.first().expect("each run has the same check names");
 
-        // Worst status wins (Fail > Skip > Pass).
+        // Worst status wins (Fail > Warn > Skip > Pass).
         let statuses: Vec<CheckStatus> = hits.iter().map(|c| c.status).collect();
         let status = worst_status(&statuses);
 
@@ -2155,6 +2188,14 @@ fn enforce_network_identity(checks: &mut [CheckResult], expected_name: &str) {
 /// "possibly stale"; an identical sequence with a changing hash is a ledger
 /// inconsistency. If there is no successful `getLatestLedger` run this is a
 /// no-op (the check is already `Fail`).
+///
+/// When at least two runs were performed and the ledger is stagnant or
+/// inconsistent, the aggregated `getLatestLedger` check is downgraded from
+/// `Pass` to [`CheckStatus::Warn`] so a frozen endpoint no longer looks
+/// healthy in CI. The downgrade only applies to a check that aggregated to
+/// `Pass` (a `Fail` from any run stays `Fail`; a `Skip` stays `Skip`), and
+/// a single run stays inconclusive (no false Warn). Warn does not change
+/// the exit code — only `Fail` exits `1`.
 fn analyze_ledger_health(per_run: &[Vec<CheckResult>], checks: &mut [CheckResult]) {
     let ledger = match checks.iter_mut().find(|c| c.name == "getLatestLedger") {
         Some(c) => c,
@@ -2162,12 +2203,22 @@ fn analyze_ledger_health(per_run: &[Vec<CheckResult>], checks: &mut [CheckResult
     };
 
     // Collect sequence + hash from every run that produced a result.
+    // Stellar RPC serializes the sequence as a JSON string in some
+    // responses and as a number in others — live endpoints return a
+    // number — so accept both, normalizing to a string for comparison.
+    // (Reading only the string form silently dropped every live run,
+    // which made this analysis a no-op on real endpoints.)
     let mut seqs: Vec<String> = Vec::new();
     let mut hashes: Vec<String> = Vec::new();
     for run in per_run {
         if let Some(lr) = run.iter().find(|c| c.name == "getLatestLedger") {
             if let Some(details) = &lr.details {
-                if let Some(seq) = details.get("sequence").and_then(|v| v.as_str()) {
+                let seq = match details.get("sequence") {
+                    Some(Value::String(s)) => s.parse::<u64>().ok(),
+                    Some(Value::Number(n)) => n.as_u64(),
+                    _ => None,
+                };
+                if let Some(seq) = seq {
                     seqs.push(seq.to_string());
                 }
                 if let Some(h) = details.get("id").and_then(|v| v.as_str()) {
@@ -2183,11 +2234,17 @@ fn analyze_ledger_health(per_run: &[Vec<CheckResult>], checks: &mut [CheckResult
     }
 
     let existing = ledger.evidence.take().unwrap_or_default();
-    let verdict = if seqs.len() == 1 {
+    // Whether the aggregated check is downgraded Pass -> Warn: only for a
+    // stagnant or inconsistent ledger seen across at least two runs.
+    // A single run is inconclusive; an advancing ledger is healthy.
+    let (verdict, downgrade_to_warn) = if seqs.len() == 1 {
         let hash = hashes.first().and_then(|h| h.get(..8)).unwrap_or("?");
-        format!(
-            " Ledger sequence {}, hash {}: self-run freshness inconclusive — use --runs > 1.",
-            seqs[0], hash
+        (
+            format!(
+                " Ledger sequence {}, hash {}: self-run freshness inconclusive — use --runs > 1.",
+                seqs[0], hash
+            ),
+            false,
         )
     } else {
         let unique_seqs: std::collections::HashSet<&str> =
@@ -2195,25 +2252,40 @@ fn analyze_ledger_health(per_run: &[Vec<CheckResult>], checks: &mut [CheckResult
         let unique_hashes: std::collections::HashSet<&str> =
             hashes.iter().map(String::as_str).collect();
         if unique_seqs.len() > 1 {
-            format!(
-                " Ledger advanced from {} to {} across {} runs — healthy.",
-                seqs.first().unwrap(),
-                seqs.last().unwrap(),
-                seqs.len()
+            (
+                format!(
+                    " Ledger advanced from {} to {} across {} runs — healthy.",
+                    seqs.first().unwrap(),
+                    seqs.last().unwrap(),
+                    seqs.len()
+                ),
+                false,
             )
-        } else if unique_hashes.len() == 1 {
+        } else if unique_hashes.len() <= 1 {
+            // Same sequence across runs, and every observed hash agrees
+            // (or no hash was observed at all — the hash comparison is
+            // unavailable, not a contradiction): possibly stale.
             let hash = hashes.first().and_then(|h| h.get(..8)).unwrap_or("?");
-            format!(
-                " Ledger sequence {} (hash {}:) unchanged across {} consecutive runs — possibly stale endpoint.",
-                seqs[0], hash, seqs.len()
+            (
+                format!(
+                    " Ledger sequence {} (hash {}:) unchanged across {} consecutive runs — possibly stale endpoint.",
+                    seqs[0], hash, seqs.len()
+                ),
+                true,
             )
         } else {
-            format!(
-                " Ledger sequence {} stable but hash changed across {} runs — possible ledger inconsistency.",
-                seqs[0], seqs.len()
+            (
+                format!(
+                    " Ledger sequence {} stable but hash changed across {} runs — possible ledger inconsistency.",
+                    seqs[0], seqs.len()
+                ),
+                true,
             )
         }
     };
+    if downgrade_to_warn && ledger.status == CheckStatus::Pass {
+        ledger.status = CheckStatus::Warn;
+    }
     ledger.evidence = Some(format!("{}{}", existing, verdict));
 }
 
@@ -2267,8 +2339,18 @@ fn compare_ledger_state(checks: &mut [CheckResult], other: &[CheckResult], other
         .and_then(|c| c.details.as_ref());
 
     if let (Some(p), Some(o)) = (primary, other_ledger) {
-        let p_seq = p.get("sequence").and_then(|v| v.as_str()).map(String::from);
-        let o_seq = o.get("sequence").and_then(|v| v.as_str()).map(String::from);
+        // Sequence is a JSON string in some responses and a number in
+        // others (live endpoints return a number); accept both, as in
+        // `analyze_ledger_health`.
+        let seq_of = |d: &serde_json::Map<String, Value>| -> Option<String> {
+            match d.get("sequence") {
+                Some(Value::String(s)) => s.parse::<u64>().ok().map(|n| n.to_string()),
+                Some(Value::Number(n)) => n.as_u64().map(|n| n.to_string()),
+                _ => None,
+            }
+        };
+        let p_seq = seq_of(p);
+        let o_seq = seq_of(o);
         let p_hash = p.get("id").and_then(|v| v.as_str()).map(String::from);
         let o_hash = o.get("id").and_then(|v| v.as_str()).map(String::from);
 
@@ -2317,7 +2399,20 @@ mod tests {
             worst_status(&[CheckStatus::Skip, CheckStatus::Fail]),
             CheckStatus::Fail
         );
-        // Skip beats Pass (but not Fail)
+        assert_eq!(
+            worst_status(&[CheckStatus::Warn, CheckStatus::Fail]),
+            CheckStatus::Fail
+        );
+        // Warn beats Skip and Pass (but not Fail)
+        assert_eq!(
+            worst_status(&[CheckStatus::Pass, CheckStatus::Warn]),
+            CheckStatus::Warn
+        );
+        assert_eq!(
+            worst_status(&[CheckStatus::Skip, CheckStatus::Warn]),
+            CheckStatus::Warn
+        );
+        // Skip beats Pass (but not Warn or Fail)
         assert_eq!(
             worst_status(&[CheckStatus::Pass, CheckStatus::Skip]),
             CheckStatus::Skip
@@ -2332,9 +2427,25 @@ mod tests {
             CheckStatus::Skip
         );
         assert_eq!(
+            worst_status(&[CheckStatus::Warn, CheckStatus::Warn]),
+            CheckStatus::Warn
+        );
+        assert_eq!(
             worst_status(&[CheckStatus::Fail, CheckStatus::Fail]),
             CheckStatus::Fail
         );
+    }
+
+    #[test]
+    fn test_aggregate_warn_beats_skip_and_pass() {
+        let per_run = vec![
+            vec![make_result("x", CheckStatus::Pass, Some(100))],
+            vec![make_result("x", CheckStatus::Warn, Some(100))],
+            vec![make_result("x", CheckStatus::Skip, None)],
+        ];
+        let result = aggregate(&per_run);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].status, CheckStatus::Warn);
     }
 
     #[test]
@@ -2428,6 +2539,23 @@ mod tests {
         assert_eq!(summary.skipped, 0);
     }
 
+    #[test]
+    fn test_summarize_counts_warned_in_ran_not_passed() {
+        let checks = vec![
+            make_result("a", CheckStatus::Pass, Some(100)),
+            make_result("b", CheckStatus::Warn, Some(100)),
+            make_result("c", CheckStatus::Fail, None),
+            make_result("d", CheckStatus::Skip, None),
+        ];
+        let summary = summarize(&checks, 2);
+        assert_eq!(summary.ran, 3);
+        assert_eq!(summary.passed, 1);
+        assert_eq!(summary.warned, 1);
+        assert_eq!(summary.failed, 1);
+        assert_eq!(summary.skipped, 1);
+        assert_eq!(summary.total_runs, 2);
+    }
+
     fn make_ledger_result(seq: &str, hash: &str) -> CheckResult {
         let mut details = serde_json::Map::new();
         details.insert(
@@ -2455,13 +2583,17 @@ mod tests {
     /// Build a report from a list of per-run check vectors, running the
     /// ledger-health analysis exactly like `run_all` does.
     fn ledger_evidence_from(per_run: &[Vec<CheckResult>]) -> String {
-        let mut checks = aggregate(per_run);
-        analyze_ledger_health(per_run, &mut checks);
-        checks
-            .iter()
-            .find(|c| c.name == "getLatestLedger")
+        ledger_check_from(per_run)
             .and_then(|c| c.evidence.clone())
             .unwrap_or_default()
+    }
+
+    /// Same as [`ledger_evidence_from`] but returns the aggregated
+    /// `getLatestLedger` check itself, so tests can assert its status.
+    fn ledger_check_from(per_run: &[Vec<CheckResult>]) -> Option<CheckResult> {
+        let mut checks = aggregate(per_run);
+        analyze_ledger_health(per_run, &mut checks);
+        checks.into_iter().find(|c| c.name == "getLatestLedger")
     }
 
     #[test]
@@ -2475,6 +2607,11 @@ mod tests {
         assert!(
             evidence.contains("inconclusive"),
             "single run must be inconclusive: {evidence}"
+        );
+        assert_eq!(
+            ledger_check_from(&per_run).map(|c| c.status),
+            Some(CheckStatus::Pass),
+            "a single run must not Warn"
         );
     }
 
@@ -2492,6 +2629,11 @@ mod tests {
             !evidence.contains("stale"),
             "advancing must not be stale: {evidence}"
         );
+        assert_eq!(
+            ledger_check_from(&per_run).map(|c| c.status),
+            Some(CheckStatus::Pass),
+            "an advancing ledger stays Pass"
+        );
     }
 
     #[test]
@@ -2503,6 +2645,11 @@ mod tests {
         ];
         let evidence = ledger_evidence_from(&per_run);
         assert!(evidence.contains("possibly stale"), "evidence: {evidence}");
+        assert_eq!(
+            ledger_check_from(&per_run).map(|c| c.status),
+            Some(CheckStatus::Warn),
+            "a stagnant ledger across runs must Warn, not Pass"
+        );
     }
 
     #[test]
@@ -2513,6 +2660,68 @@ mod tests {
         ];
         let evidence = ledger_evidence_from(&per_run);
         assert!(evidence.contains("inconsistency"), "evidence: {evidence}");
+        assert_eq!(
+            ledger_check_from(&per_run).map(|c| c.status),
+            Some(CheckStatus::Warn),
+            "an inconsistent ledger across runs must Warn, not Pass"
+        );
+    }
+
+    #[test]
+    fn test_ledger_health_numeric_sequence_stagnant_warns() {
+        // Live endpoints return `sequence` as a JSON number, not a
+        // string; the analysis must accept both forms (a string-only
+        // read silently dropped every live run).
+        fn numeric_result(seq: u64, hash: &str) -> CheckResult {
+            let mut details = serde_json::Map::new();
+            details.insert("sequence".to_string(), Value::from(seq));
+            details.insert("id".to_string(), Value::String(hash.to_string()));
+            CheckResult {
+                name: "getLatestLedger".to_string(),
+                status: CheckStatus::Pass,
+                timestamp: "2026-01-01T00:00:00Z".to_string(),
+                duration_ms: Some(100),
+                http_status: Some(200),
+                endpoint: "https://example.com".to_string(),
+                details: Some(details),
+                error: None,
+                error_message: None,
+                evidence: None,
+            }
+        }
+        let per_run = vec![
+            vec![numeric_result(100, "deadbeef")],
+            vec![numeric_result(100, "deadbeef")],
+        ];
+        let check = ledger_check_from(&per_run).expect("getLatestLedger present");
+        assert_eq!(
+            check.status,
+            CheckStatus::Warn,
+            "a stagnant numeric-sequence ledger must Warn"
+        );
+        assert!(
+            check
+                .evidence
+                .as_deref()
+                .unwrap_or("")
+                .contains("possibly stale"),
+            "evidence: {:?}",
+            check.evidence
+        );
+    }
+
+    #[test]
+    fn test_ledger_health_failed_check_stays_failed() {
+        // A getLatestLedger that Failed in one run must stay Fail after
+        // the health analysis — Warn never overwrites a failure.
+        let mut failed = make_ledger_result("100", "deadbeef");
+        failed.status = CheckStatus::Fail;
+        let per_run = vec![vec![make_ledger_result("100", "deadbeef")], vec![failed]];
+        assert_eq!(
+            ledger_check_from(&per_run).map(|c| c.status),
+            Some(CheckStatus::Fail),
+            "a failed ledger check must stay Fail"
+        );
     }
 
     #[test]
@@ -2548,6 +2757,7 @@ mod tests {
                 ran: 2,
                 passed: 2,
                 failed: 0,
+                warned: 0,
                 skipped: 0,
                 total_runs: 1,
             },

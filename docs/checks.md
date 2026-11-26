@@ -30,8 +30,24 @@ method check in isolation (the HTTP connectivity check always runs regardless).
 - **Fail** — the check ran but the endpoint returned an error: an HTTP 5xx
   status, a JSON-RPC error object, a malformed response, or a connection/
   timeout error.
+- **Warn** — the check ran and the endpoint answered, but the observed
+  state is suspicious: with `--runs N` (N ≥ 2), `getLatestLedger` reports
+  `Warn` instead of `Pass` when the ledger does not advance (same sequence
+  and hash across runs — "possibly stale") or is inconsistent (same
+  sequence, changing hash). A single run is inconclusive and never Warns.
+  Runs execute back-to-back with no delay, and Stellar ledgers close
+  roughly every 5 seconds, so two samples taken inside one ledger
+  interval also read as "unchanged" — a `Warn` on a healthy endpoint is
+  expected in that case, and is a prompt to look closer, not proof the
+  endpoint is frozen. Warn is counted in `ran` but not in `passed`, and
+  never changes the exit code — only `Fail` exits `1`.
 - **Skip** — the check was not attempted (for example, because `--method`
   selected a different check).
+
+Aggregation precedence across runs is **Fail > Warn > Skip > Pass**: a
+`Fail` in any run is never hidden by another run's `Warn`/`Skip`/`Pass`,
+and a `Warn` is never hidden by `Skip`/`Pass` — but a `Warn` never
+outranks a `Fail`.
 
 ### Limitations
 

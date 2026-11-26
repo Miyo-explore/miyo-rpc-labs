@@ -31,7 +31,7 @@ miyo-rpc check --help
 | `--method <NAME>`  | `-m`  | _(none)_  | Run only the named JSON-RPC method. For a built-in check (`getHealth`, `getNetwork`, `getLatestLedger`, `getVersionInfo`, `getEvents`, `getLedgerEntries`, `getLedgers`, `getTransactions`, `getFeeStats`, `getTransaction`, `simulateTransaction`) the enriched check runs; for any other name a single arbitrary-method probe runs with `--params`. The HTTP connectivity check (`httpConnectivity`) always runs regardless of this flag. |
 | `--params <JSON>`  |       | _(none)_  | JSON-RPC `params` for an arbitrary-method probe: a JSON object, array, or `null`. Must be valid JSON, or the CLI exits `2` before any request is sent. Raw params are never echoed in output. Only applies when `--method` names a non-built-in method; otherwise the params are ignored (warning on stderr). |
 | `--params-file <FILE>` |  | _(none)_ | Read JSON-RPC `params` from a file (same JSON rules as `--params`). Only applies when `--method` names a non-built-in method; otherwise the params are ignored (warning on stderr). |
-| `--runs <N>`       | `-n`  | `1`       | Number of diagnostic runs to perform. Clamped to the range `[1, 10]` by the CLI. |
+| `--runs <N>`       | `-n`  | `1`       | Number of diagnostic runs to perform. Clamped to the range `[1, 10]` by the CLI. With N ≥ 2, `getLatestLedger` reports `Warn` (not `Pass`) when the ledger is stagnant or inconsistent across runs; see [Checks](checks.md). |
 | `--expected-network <NAME>` | _(none)_ | Validate the endpoint's `getNetwork` passphrase against `testnet`, `mainnet`, or `futurenet`. A mismatch is reported as FAIL (exit code 1). |
 | `--compare <URL>`      | _(none)_ | Compare the primary endpoint's `getNetwork` passport + `getLatestLedger` sequence/hash against a second endpoint `<URL>`. Divergences are appended as `evidence` (informational; exit code unchanged). |
 | `--user-agent <STRING>` | _(none)_ | `miyo-rpc/<VERSION>` | Override the HTTP `User-Agent` header sent with requests. Useful when a gateway, proxy, or rate limiter filters on `User-Agent`. |
@@ -65,6 +65,6 @@ miyo-rpc check --help
 
 | Code | Meaning                                                              |
 |------|----------------------------------------------------------------------|
-| `0`  | All executed checks passed (no `Fail` results).                       |
+| `0`  | All executed checks passed (no `Fail` results). A `Warn`-only run exits `0` — warnings are flagged, not failed. |
 | `1`  | One or more checks returned `Fail`.                                 |
 | `2`  | A non-check error occurred (for example, the report could not be serialized to JSON). |
