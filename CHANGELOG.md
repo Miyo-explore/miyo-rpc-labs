@@ -37,6 +37,19 @@ This project ships **two decoupled version numbers**:
   in `details`) instead of being silently followed. Without the flag,
   behaviour is unchanged (#36).
 
+### Added
+- `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1); README table of contents,
+  status badges, and a Contributing section linking `CONTRIBUTING.md`.
+- Repository topics (`stellar`, `soroban`, `rust`, `rpc`, `diagnostics`,
+  `cli`) and homepage URL.
+
+### Changed
+- `LICENSE` replaced with the canonical Apache-2.0 text from apache.org; the
+  previous file was a non-canonical variant GitHub did not recognise.
+- Issue template renamed `.github/ISSUE_TEMPLATE/drips_wave_task.md` →
+  `contributor_task.md` with neutral wording; all `drips-wave` / `[wave]`
+  references removed from repo files and the `drips-wave` label deleted.
+
 ## [0.3.0] - 2026-11-25
 
 ### Added — Public endpoint report (2026-11-23)
