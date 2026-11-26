@@ -12,7 +12,7 @@ miyo-rpc check --url <RPC_URL> --timeout-secs 10     # override the 15s default
 miyo-rpc check --url <RPC_URL> --runs 5              # repeat 5× with latency stats
 miyo-rpc check --url <RPC_URL> --expected-network testnet  # validate network identity (testnet/mainnet/futurenet)
 miyo-rpc check --url <RPC_URL> --compare <SECOND_RPC_URL>   # compare network identity + ledger against a second endpoint
-miyo-rpc check --url <RPC_URL> --method getTransaction --params '{"hash":"abc..."}'   # probe a non-built-in method with params
+miyo-rpc check --url <RPC_URL> --method getFeeStats    # one built-in check (httpConnectivity still runs)
 miyo-rpc check --url <RPC_URL> --method simulateTransaction --params-file tx.json        # params from a file
 miyo-rpc batch --file endpoints.txt                          # diagnose many endpoints (one URL per line; see Batch Mode)
 miyo-rpc batch --file endpoints.txt --output json            # aggregated JSON (schema_version "1.0")
@@ -28,7 +28,7 @@ miyo-rpc check --help
 | `--url <URL>`      | `-u`  | _required_ | The Stellar JSON-RPC endpoint URL to diagnose.                       |
 | `--output <FMT>`   | `-o`  | `human`   | `human` (colored terminal) or `json`. Colors are off when `NO_COLOR` is set to a non-empty value or stdout is not a terminal. |
 | `--timeout-secs`   | `-t`  | `15`      | Maximum time to wait per HTTP request.                               |
-| `--method <NAME>`  | `-m`  | _(none)_  | Run only the named JSON-RPC method. For a built-in check (`getHealth`, `getNetwork`, `getLatestLedger`, `getVersionInfo`, `getEvents`, `getLedgerEntries`, `getLedgers`, `getTransactions`) the enriched check runs; for any other name a single arbitrary-method probe runs with `--params`. The HTTP connectivity check (`httpConnectivity`) always runs regardless of this flag. |
+| `--method <NAME>`  | `-m`  | _(none)_  | Run only the named JSON-RPC method. For a built-in check (`getHealth`, `getNetwork`, `getLatestLedger`, `getVersionInfo`, `getEvents`, `getLedgerEntries`, `getLedgers`, `getTransactions`, `getFeeStats`, `getTransaction`) the enriched check runs; for any other name a single arbitrary-method probe runs with `--params`. The HTTP connectivity check (`httpConnectivity`) always runs regardless of this flag. |
 | `--params <JSON>`  |       | _(none)_  | JSON-RPC `params` for an arbitrary-method probe: a JSON object, array, or `null`. Must be valid JSON, or the CLI exits `2` before any request is sent. Raw params are never echoed in output. Only applies when `--method` names a non-built-in method; otherwise the params are ignored (warning on stderr). |
 | `--params-file <FILE>` |  | _(none)_ | Read JSON-RPC `params` from a file (same JSON rules as `--params`). Only applies when `--method` names a non-built-in method; otherwise the params are ignored (warning on stderr). |
 | `--runs <N>`       | `-n`  | `1`       | Number of diagnostic runs to perform. Clamped to the range `[1, 10]` by the CLI. |
@@ -44,7 +44,7 @@ miyo-rpc check --help
 > always runs, regardless of `--method`. The flag only filters the
 > **JSON-RPC method checks** (`getHealth`, `getNetwork`, `getLatestLedger`,
 > `getVersionInfo`, `getEvents`, `getLedgerEntries`, `getLedgers`,
-> `getTransactions`). Method checks that do not match are reported as `SKIP`
+> `getTransactions`, `getFeeStats`, `getTransaction`). Method checks that do not match are reported as `SKIP`
 > with `evidence` set to `"Skipped: --method filter does not match this
 > check."`.
 

@@ -807,6 +807,379 @@ impl RpcCheck for GetTransactionsCheck {
     }
 }
 
+/// Built-in check for `getFeeStats`.
+///
+/// Sends a `getFeeStats` JSON-RPC request with no params and surfaces the
+/// fee statistics in `details`: the Soroban inclusion-fee mode / p95 /
+/// transaction count, the classic inclusion-fee mode / p95, and the
+/// `latestLedger` the statistics were computed over.
+///
+/// Response shape (verified live against soroban-testnet.stellar.org):
+/// `result` carries `sorobanInclusionFee`, `inclusionFee`, and
+/// `latestLedger`; each fee object holds percentiles (`max`, `min`,
+/// `mode`, `p10` … `p99`) plus `transactionCount` and `ledgerCount`.
+/// There is no `feeCharged` percentile and no `ledgerCapacityUsage` field
+/// in the current response — older descriptions of this method mention
+/// them, but the live wire format does not return them.
+///
+/// A JSON-RPC error (including `-32601` on an endpoint that does not
+/// implement the method) is a Fail with
+/// [`IssueCategory::UnsupportedMethod`], like the other built-in method
+/// checks — no built-in check Skips on `-32601` today.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GetFeeStatsCheck;
+
+impl RpcCheck for GetFeeStatsCheck {
+    fn name(&self) -> &str {
+        "getFeeStats"
+    }
+
+    fn run<'a>(
+        &'a self,
+        client: &'a RpcClient,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = CheckResult> + Send + 'a>> {
+        Box::pin(async move {
+            let endpoint = client.sanitized_url();
+            let timestamp = chrono::Utc::now().to_rfc3339();
+            let method = "getFeeStats";
+            let evidence = format!(
+                "Sent JSON-RPC 2.0 POST to {endpoint} with method 'getFeeStats' and no params."
+            );
+
+            match client.call::<Value>(method, None).await {
+                Ok((info, result)) => {
+                    // Read one percentile out of a nested fee object, e.g.
+                    // result["sorobanInclusionFee"]["mode"]. Both number
+                    // and numeric-string forms are accepted.
+                    let fee_stat = |fee_key: &str, stat_key: &str| -> Option<u64> {
+                        result
+                            .get(fee_key)
+                            .and_then(|fee| parse_u64_field(fee, stat_key))
+                    };
+                    let soroban_mode = fee_stat("sorobanInclusionFee", "mode");
+                    let soroban_p95 = fee_stat("sorobanInclusionFee", "p95");
+                    let soroban_tx_count = fee_stat("sorobanInclusionFee", "transactionCount");
+                    let inclusion_mode = fee_stat("inclusionFee", "mode");
+                    let inclusion_p95 = fee_stat("inclusionFee", "p95");
+
+                    // The fee objects are the substance of the response:
+                    // a result without either of them is malformed, not a
+                    // Pass. `latestLedger` is optional context, not proof.
+                    if soroban_mode.is_none() && inclusion_mode.is_none() {
+                        return fail_result(
+                            method,
+                            &endpoint,
+                            timestamp,
+                            &MiyoError::MalformedStructure(
+                                "getFeeStats result has neither 'sorobanInclusionFee' nor 'inclusionFee' fee object"
+                                    .to_string(),
+                            ),
+                            evidence,
+                        );
+                    }
+
+                    let duration_ms = info.duration.as_millis() as u64;
+                    let mut details = serde_json::Map::new();
+                    details.insert(
+                        "description".to_string(),
+                        Value::String(
+                            "Fee statistics for recent ledgers (inclusion fee percentiles)."
+                                .to_string(),
+                        ),
+                    );
+                    details.insert(
+                        "http_status".to_string(),
+                        Value::Number(serde_json::Number::from(info.status)),
+                    );
+                    if let Some(mode) = soroban_mode {
+                        details.insert(
+                            "soroban_inclusion_fee_mode".to_string(),
+                            Value::Number(serde_json::Number::from(mode)),
+                        );
+                    }
+                    if let Some(p95) = soroban_p95 {
+                        details.insert(
+                            "soroban_inclusion_fee_p95".to_string(),
+                            Value::Number(serde_json::Number::from(p95)),
+                        );
+                    }
+                    if let Some(count) = soroban_tx_count {
+                        details.insert(
+                            "soroban_inclusion_fee_transaction_count".to_string(),
+                            Value::Number(serde_json::Number::from(count)),
+                        );
+                    }
+                    if let Some(mode) = inclusion_mode {
+                        details.insert(
+                            "inclusion_fee_mode".to_string(),
+                            Value::Number(serde_json::Number::from(mode)),
+                        );
+                    }
+                    if let Some(p95) = inclusion_p95 {
+                        details.insert(
+                            "inclusion_fee_p95".to_string(),
+                            Value::Number(serde_json::Number::from(p95)),
+                        );
+                    }
+                    if let Some(latest) = parse_u64_field(&result, "latestLedger") {
+                        details.insert(
+                            "latest_ledger".to_string(),
+                            Value::Number(serde_json::Number::from(latest)),
+                        );
+                    }
+
+                    CheckResult {
+                        name: method.to_string(),
+                        status: CheckStatus::Pass,
+                        timestamp,
+                        duration_ms: Some(duration_ms),
+                        http_status: Some(info.status),
+                        endpoint: endpoint.clone(),
+                        details: Some(details),
+                        error: None,
+                        error_message: None,
+                        evidence: Some(evidence),
+                    }
+                }
+                Err(e) => fail_result(method, &endpoint, timestamp, &e, evidence),
+            }
+        })
+    }
+}
+
+/// Built-in check for `getTransaction` (singular).
+///
+/// Distinct from the `getTransactions` (plural) check: `getTransaction`
+/// fetches one transaction by hash, so this check first resolves the
+/// latest ledger, fetches one page of transactions from it
+/// (`pagination.limit` = [`GET_TRANSACTIONS_PAGE_LIMIT`]), and calls
+/// `getTransaction` with the first returned hash. Details carry
+/// `tx_hash`, `status`, `ledger`, `fee_charged`, and XDR-presence flags
+/// (`has_envelope_xdr`, `has_result_xdr`, `has_result_meta_xdr`).
+///
+/// An empty page is a Skip, not a Fail: there is no transaction to
+/// fetch, so the method was never exercised. If `getLatestLedger` or
+/// `getTransactions` fails, the check fails instead of probing with a
+/// guessed ledger or hash. No user-supplied params are involved —
+/// `--params` is still ignored for built-in methods.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GetTransactionCheck;
+
+impl RpcCheck for GetTransactionCheck {
+    fn name(&self) -> &str {
+        "getTransaction"
+    }
+
+    fn run<'a>(
+        &'a self,
+        client: &'a RpcClient,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = CheckResult> + Send + 'a>> {
+        Box::pin(async move {
+            let endpoint = client.sanitized_url();
+            let timestamp = chrono::Utc::now().to_rfc3339();
+            let method = "getTransaction";
+
+            // 1. Resolve startLedger from getLatestLedger (same as the
+            // getTransactions check: a hardcoded ledger would rot).
+            let sequence = match client.call::<Value>("getLatestLedger", None).await {
+                Ok((_, result)) => match parse_ledger_sequence(&result) {
+                    Some(seq) => seq,
+                    None => {
+                        return fail_result(
+                            method,
+                            &endpoint,
+                            timestamp,
+                            &MiyoError::MalformedStructure(
+                                "getLatestLedger result has no usable 'sequence' field".to_string(),
+                            ),
+                            "Call getLatestLedger to resolve the startLedger for getTransaction."
+                                .to_string(),
+                        );
+                    }
+                },
+                Err(e) => {
+                    return fail_result(
+                        method,
+                        &endpoint,
+                        timestamp,
+                        &e,
+                        "Call getLatestLedger to resolve the startLedger for getTransaction before calling getTransactions."
+                            .to_string(),
+                    );
+                }
+            };
+
+            // 2. Fetch one page of transactions starting at the latest
+            // ledger and take the first hash.
+            let page_params = serde_json::json!({
+                "startLedger": sequence,
+                "pagination": { "limit": GET_TRANSACTIONS_PAGE_LIMIT },
+            });
+            let page_evidence = format!(
+                "Sent JSON-RPC 2.0 POST to {endpoint} with method 'getTransactions' and params {{startLedger: {sequence}, pagination: {{limit: {GET_TRANSACTIONS_PAGE_LIMIT}}}}} (startLedger resolved from getLatestLedger)."
+            );
+            let tx_hash = match client
+                .call::<Value>("getTransactions", Some(page_params))
+                .await
+            {
+                Ok((_, result)) => match result.get("transactions").and_then(Value::as_array) {
+                    Some(transactions) => match transactions.first() {
+                        // Live `getTransactions` pages carry the hash as
+                        // `txHash`; older RPC versions returned `hash`.
+                        // Accept both, preferring the live field.
+                        Some(tx) => match tx
+                            .get("txHash")
+                            .or_else(|| tx.get("hash"))
+                            .and_then(Value::as_str)
+                        {
+                            Some(hash) => hash.to_string(),
+                            None => {
+                                return fail_result(
+                                    method,
+                                    &endpoint,
+                                    timestamp,
+                                    &MiyoError::MalformedStructure(
+                                        "getTransactions page has a transaction with no 'txHash' (or legacy 'hash') string"
+                                            .to_string(),
+                                    ),
+                                    page_evidence,
+                                );
+                            }
+                        },
+                        None => {
+                            // No transaction exists to fetch: the method
+                            // was never exercised, so Skip, not Fail.
+                            return CheckResult {
+                                name: method.to_string(),
+                                status: CheckStatus::Skip,
+                                timestamp,
+                                duration_ms: None,
+                                http_status: None,
+                                endpoint: endpoint.clone(),
+                                details: None,
+                                error: None,
+                                error_message: None,
+                                evidence: Some(format!(
+                                    "{page_evidence} The latest ledger ({sequence}) holds no transactions, so there is no hash to call getTransaction with."
+                                )),
+                            };
+                        }
+                    },
+                    None => {
+                        return fail_result(
+                            method,
+                            &endpoint,
+                            timestamp,
+                            &MiyoError::MalformedStructure(
+                                "getTransactions result has no 'transactions' array".to_string(),
+                            ),
+                            page_evidence,
+                        );
+                    }
+                },
+                Err(e) => {
+                    return fail_result(method, &endpoint, timestamp, &e, page_evidence);
+                }
+            };
+
+            // 3. Fetch the single transaction by hash.
+            let params = serde_json::json!({ "hash": tx_hash });
+            let evidence = format!(
+                "Sent JSON-RPC 2.0 POST to {endpoint} with method 'getTransaction' and params {{hash: {tx_hash}}} (hash taken from the first transaction in the latest ledger, {sequence})."
+            );
+            match client.call::<Value>(method, Some(params)).await {
+                Ok((info, result)) => {
+                    let status = result.get("status").and_then(Value::as_str);
+                    let fee_charged = match result.get("feeCharged") {
+                        Some(Value::String(s)) => Some(s.clone()),
+                        Some(Value::Number(n)) => Some(n.to_string()),
+                        _ => None,
+                    };
+                    // The status is the substance of the response: a
+                    // result without it is malformed, not a Pass.
+                    let Some(status) = status else {
+                        return fail_result(
+                            method,
+                            &endpoint,
+                            timestamp,
+                            &MiyoError::MalformedStructure(
+                                "getTransaction result has no 'status' string".to_string(),
+                            ),
+                            evidence,
+                        );
+                    };
+
+                    let duration_ms = info.duration.as_millis() as u64;
+                    let mut details = serde_json::Map::new();
+                    details.insert(
+                        "description".to_string(),
+                        Value::String(
+                            "Single transaction by hash (first transaction in the latest ledger)."
+                                .to_string(),
+                        ),
+                    );
+                    details.insert(
+                        "http_status".to_string(),
+                        Value::Number(serde_json::Number::from(info.status)),
+                    );
+                    details.insert("tx_hash".to_string(), Value::String(tx_hash));
+                    details.insert("status".to_string(), Value::String(status.to_string()));
+                    if let Some(ledger) = parse_u64_field(&result, "ledger") {
+                        details.insert(
+                            "ledger".to_string(),
+                            Value::Number(serde_json::Number::from(ledger)),
+                        );
+                    }
+                    if let Some(fee) = fee_charged {
+                        details.insert("fee_charged".to_string(), Value::String(fee));
+                    }
+                    details.insert(
+                        "has_envelope_xdr".to_string(),
+                        Value::Bool(
+                            result
+                                .get("envelopeXdr")
+                                .and_then(Value::as_str)
+                                .is_some_and(|x| !x.is_empty()),
+                        ),
+                    );
+                    details.insert(
+                        "has_result_xdr".to_string(),
+                        Value::Bool(
+                            result
+                                .get("resultXdr")
+                                .and_then(Value::as_str)
+                                .is_some_and(|x| !x.is_empty()),
+                        ),
+                    );
+                    details.insert(
+                        "has_result_meta_xdr".to_string(),
+                        Value::Bool(
+                            result
+                                .get("resultMetaXdr")
+                                .and_then(Value::as_str)
+                                .is_some_and(|x| !x.is_empty()),
+                        ),
+                    );
+
+                    CheckResult {
+                        name: method.to_string(),
+                        status: CheckStatus::Pass,
+                        timestamp,
+                        duration_ms: Some(duration_ms),
+                        http_status: Some(info.status),
+                        endpoint: endpoint.clone(),
+                        details: Some(details),
+                        error: None,
+                        error_message: None,
+                        evidence: Some(evidence),
+                    }
+                }
+                Err(e) => fail_result(method, &endpoint, timestamp, &e, evidence),
+            }
+        })
+    }
+}
+
 /// Check raw HTTP connectivity and status code — independent of JSON-RPC.
 ///
 /// `follow_redirects` mirrors the `RpcClient` policy: follow by default, but
@@ -993,7 +1366,9 @@ fn fail_result(
 /// `getTransactions` derive their own `startLedger` from `getLatestLedger`
 /// and fetch one page each (see [`GetEventsCheck`], [`GetLedgersCheck`],
 /// and [`GetTransactionsCheck`]); `getLedgerEntries` probes a fixed
-/// synthetic key (see [`GetLedgerEntriesCheck`]).
+/// synthetic key (see [`GetLedgerEntriesCheck`]); `getFeeStats` sends no
+/// params (see [`GetFeeStatsCheck`]); `getTransaction` fetches the first
+/// transaction of the latest ledger by hash (see [`GetTransactionCheck`]).
 pub fn all_checks() -> Vec<Box<dyn RpcCheck + Send + Sync>> {
     vec![
         Box::new(SimpleMethodCheck {
@@ -1020,6 +1395,8 @@ pub fn all_checks() -> Vec<Box<dyn RpcCheck + Send + Sync>> {
         Box::new(GetLedgerEntriesCheck),
         Box::new(GetLedgersCheck),
         Box::new(GetTransactionsCheck),
+        Box::new(GetFeeStatsCheck),
+        Box::new(GetTransactionCheck),
     ]
 }
 
@@ -1033,6 +1410,8 @@ pub const BUILTIN_METHODS: &[&str] = &[
     "getLedgerEntries",
     "getLedgers",
     "getTransactions",
+    "getFeeStats",
+    "getTransaction",
 ];
 
 /// Whether `name` refers to one of the built-in checks ([`BUILTIN_METHODS`]).
@@ -2031,10 +2410,12 @@ mod tests {
             "getLedgerEntries",
             "getLedgers",
             "getTransactions",
+            "getFeeStats",
+            "getTransaction",
         ] {
             assert!(is_builtin_method(m), "{m} should be built-in");
         }
-        for m in ["getTransaction", "simulateTransaction", ""] {
+        for m in ["simulateTransaction", ""] {
             assert!(!is_builtin_method(m), "{m} should not be built-in");
         }
     }
@@ -2166,7 +2547,7 @@ mod tests {
         assert_eq!(GetEventsCheck.name(), "getEvents");
         assert_eq!(GET_EVENTS_PAGE_LIMIT, 10);
         assert!(is_builtin_method("getEvents"));
-        assert_eq!(BUILTIN_METHODS.len(), 8);
+        assert_eq!(BUILTIN_METHODS.len(), 10);
         let checks = all_checks();
         let names: Vec<&str> = checks.iter().map(|c| c.name()).collect();
         assert_eq!(
@@ -2179,7 +2560,9 @@ mod tests {
                 "getEvents",
                 "getLedgerEntries",
                 "getLedgers",
-                "getTransactions"
+                "getTransactions",
+                "getFeeStats",
+                "getTransaction"
             ]
         );
     }

@@ -49,7 +49,7 @@ v0.1.0 resolves the original roadmap gaps: network-identity validation
 (`--expected-network`), cross-run ledger progression (`--runs`), `--compare`
 for cross-endpoint divergence, machine-readable `schema_version` (`"1.0"`),
 URL sanitization, and a CI + release workflow now ship. By-design scope limits
-for the current release (plain-`GET` connectivity semantics, only eight built-in
+for the current release (plain-`GET` connectivity semantics, only ten built-in
 JSON-RPC methods, no provider-specific error taxonomy, no sustained
 benchmarking) are documented in the README "Limitations" section.
 

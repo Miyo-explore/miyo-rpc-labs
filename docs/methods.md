@@ -4,16 +4,16 @@
 
 ## Arbitrary Method Probing
 
-By default `check` runs the eight built-in checks (`getHealth`, `getNetwork`,
+By default `check` runs the ten built-in checks (`getHealth`, `getNetwork`,
 `getLatestLedger`, `getVersionInfo`, `getEvents`, `getLedgerEntries`,
-`getLedgers`, `getTransactions`) plus `httpConnectivity`. To exercise a
-Soroban method that is not built in — e.g. `getTransaction`,
-or `simulateTransaction` — pass its name to `--method` together
-with JSON-RPC `params`:
+`getLedgers`, `getTransactions`, `getFeeStats`, `getTransaction`) plus
+`httpConnectivity`. To exercise a Soroban method that is not built in —
+e.g. `simulateTransaction` — pass its name to `--method` together with
+JSON-RPC `params`:
 
 ```text
 miyo-rpc check --url https://soroban-testnet.stellar.org \
-  --method getTransaction --params '{"hash":"0x..."}'
+  --method simulateTransaction --params '{"transaction":"AAAA..."}'
 ```
 
 - `--params` accepts a JSON **object**, **array**, or `null`. Malformed JSON or

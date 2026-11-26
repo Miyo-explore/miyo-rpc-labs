@@ -65,6 +65,8 @@ method check in isolation (the HTTP connectivity check always runs regardless).
 | `getLedgerEntries` | `getLedgerEntries`| Ledger entries for a fixed probe key (one synthetic Account key).  |
 | `getLedgers`       | `getLedgers`      | Ledger headers from the latest ledger (one page of 2).             |
 | `getTransactions`  | `getTransactions` | Transactions in the latest ledger (one page of 2).                 |
+| `getFeeStats`      | `getFeeStats`     | Fee statistics for recent ledgers (inclusion fee percentiles).     |
+| `getTransaction`   | `getTransaction`  | Single transaction by hash (first transaction in the latest ledger).|
 
 Status semantics and limitations: [docs/checks.md](docs/checks.md).
 
@@ -94,7 +96,7 @@ miyo-rpc check --url <RPC_URL> --timeout-secs 10     # override the 15s default
 miyo-rpc check --url <RPC_URL> --runs 5              # repeat 5× with latency stats
 miyo-rpc check --url <RPC_URL> --expected-network testnet  # validate network identity (testnet/mainnet/futurenet)
 miyo-rpc check --url <RPC_URL> --compare <SECOND_RPC_URL>   # compare network identity + ledger against a second endpoint
-miyo-rpc check --url <RPC_URL> --method getTransaction --params '{"hash":"abc..."}'   # probe a non-built-in method with params
+miyo-rpc check --url <RPC_URL> --method getFeeStats    # one built-in check (httpConnectivity still runs)
 miyo-rpc check --url <RPC_URL> --method simulateTransaction --params-file tx.json        # params from a file
 miyo-rpc batch --file endpoints.txt                          # diagnose many endpoints (one URL per line; see Batch Mode)
 miyo-rpc batch --file endpoints.txt --output json            # aggregated JSON (schema_version "1.0")
