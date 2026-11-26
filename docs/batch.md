@@ -37,7 +37,7 @@ automation.
 **Human output** (`--output human`):
 
 ```
-Miyo RPC Labs v0.4.0
+Miyo RPC Labs v0.5.0
 Batch diagnosis: 2 endpoint(s)
 
   https://soroban-testnet.stellar.org [PASS] 5 passed, 0 failed
@@ -51,7 +51,7 @@ Summary: 2 total, 1 valid, 1 invalid, 1 healthy, 0 failed (exit code 0)
 ```json
 {
   "schema_version": "1.0",
-  "tool_version": "0.4.0",
+  "tool_version": "0.5.0",
   "runs": 1,
   "endpoints": [
     {

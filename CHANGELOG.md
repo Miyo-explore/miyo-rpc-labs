@@ -24,7 +24,7 @@ This project ships **two decoupled version numbers**:
   Consumers MUST read `schema_version` and MUST ignore fields they do not
   recognize.
 
-## [Unreleased]
+## [0.5.0] - 2026-11-27
 
 ### Added
 - Built-in `contractTtl` check: reads a contract's instance entry and
