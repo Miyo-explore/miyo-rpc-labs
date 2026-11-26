@@ -112,6 +112,7 @@ benchmarking) are documented in the README "Limitations" section.
 | `--user-agent` override + `--max-response-bytes` cap (`check`-only) | Implemented | `src/cli.rs`, `src/diagnostics.rs` |
 | `--no-follow-redirects` (`check`-only; `httpConnectivity` honours it too) | Implemented | `src/cli.rs`, `src/diagnostics.rs` |
 | `futurenet` known network for `--expected-network` | Implemented | `src/network.rs` |
+| Testnet passphrase corrected (`September 2015`, verified live) | Implemented | `src/network.rs` |
 | `batch --output human` + per-endpoint timeout (docs + tests) | Implemented | `src/output.rs`, `src/main.rs` |
 | `NO_COLOR` + non-TTY color gating in human output | Implemented | `src/output.rs` |
 | Public endpoint diagnostic report (mainnet/testnet/futurenet, 8 methods, 3 runs each) | Implemented | `docs/ENDPOINT-REPORT-2026-11.md` |
