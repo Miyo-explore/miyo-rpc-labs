@@ -102,6 +102,18 @@ pub struct CheckArgs {
     /// of being followed to a different host.
     #[arg(long)]
     pub no_follow_redirects: bool,
+
+    /// Contract ID (strkey `C...`) whose instance and code TTL to check.
+    /// The `contractTtl` check only runs when this is given; without it
+    /// the check is absent from the report (default runs keep 12 checks).
+    #[arg(long, value_name = "CONTRACT")]
+    pub contract: Option<String>,
+
+    /// TTL threshold in ledgers (default: 17280 ≈ 1 day). Remaining
+    /// ledgers at or below this threshold report `Warn` (inclusive).
+    /// Only applies when `--contract` is given.
+    #[arg(long, value_name = "N")]
+    pub ttl_threshold: Option<u64>,
 }
 
 /// Arguments for the `batch` subcommand (multiple endpoints from a file).

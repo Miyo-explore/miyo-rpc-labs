@@ -728,3 +728,99 @@ fn test_warn_only_run_exits_zero() {
         "summary line must count the warning: {stdout}"
     );
 }
+
+#[test]
+fn test_check_invalid_contract_rejected() {
+    // A malformed --contract is a usage error (exit code 2) rejected
+    // before any network request is made. The URL is unreachable on
+    // purpose: the guard must fire before the client is even constructed.
+    let output = Command::new(BIN)
+        .args([
+            "check",
+            "--url",
+            "http://127.0.0.1:1",
+            "--contract",
+            "NOTACONTRACT",
+        ])
+        .output()
+        .expect("failed to execute miyo-rpc check");
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "invalid --contract should exit with code 2"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("contract"),
+        "stderr should mention 'contract', got: {stderr}"
+    );
+}
+
+#[test]
+fn test_check_contract_bad_checksum_rejected() {
+    // A 56-character C... value with a bad checksum is still invalid.
+    let output = Command::new(BIN)
+        .args([
+            "check",
+            "--url",
+            "http://127.0.0.1:1",
+            "--contract",
+            "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSD",
+        ])
+        .output()
+        .expect("failed to execute miyo-rpc check");
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "bad-checksum --contract should exit with code 2"
+    );
+}
+
+#[test]
+fn test_check_contract_ttl_method_requires_contract() {
+    // --method contractTtl without --contract is a usage error: the check
+    // has nothing to check.
+    let output = Command::new(BIN)
+        .args([
+            "check",
+            "--url",
+            "http://127.0.0.1:1",
+            "--method",
+            "contractTtl",
+        ])
+        .output()
+        .expect("failed to execute miyo-rpc check");
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "--method contractTtl without --contract should exit with code 2"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--contract"),
+        "stderr should mention '--contract', got: {stderr}"
+    );
+}
+
+#[test]
+fn test_check_valid_contract_not_rejected_with_code_2() {
+    // A valid contract strkey (the native XLM Stellar Asset Contract)
+    // must pass validation. The loopback URL refuses the connection
+    // immediately, so the run fails with code 1 (failed checks) — never
+    // code 2 — and no live endpoint is contacted.
+    let output = Command::new(BIN)
+        .args([
+            "check",
+            "--url",
+            "http://127.0.0.1:1",
+            "--contract",
+            "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+        ])
+        .output()
+        .expect("failed to execute miyo-rpc check");
+    assert_ne!(
+        output.status.code(),
+        Some(2),
+        "valid --contract must not exit with code 2"
+    );
+}

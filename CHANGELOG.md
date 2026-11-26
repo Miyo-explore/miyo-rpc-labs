@@ -26,6 +26,26 @@ This project ships **two decoupled version numbers**:
 
 ## [Unreleased]
 
+### Added
+- Built-in `contractTtl` check: reads a contract's instance entry and
+  its Wasm code entry via `getLedgerEntries` and reports remaining
+  ledgers until expiry (`liveUntilLedgerSeq` minus the latest ledger
+  sequence). New flags `--contract <C...>` (validated strkey, exit code
+  `2` when malformed) and `--ttl-threshold <N>` (default 17280 ledgers,
+  ≈ 1 day). Remaining ledgers at or below the threshold report `Warn`
+  (inclusive boundary); above it, `Pass`. A missing instance entry is a
+  Fail (archived / expired / never deployed), as is a missing code entry
+  for a Wasm contract; a Stellar Asset Contract has no code entry by
+  design, so the check judges by the instance entry alone and reports
+  `code_remaining_ledgers` as `null`. The check only runs when
+  `--contract` is given — default runs keep 12 checks. Live-verified on
+  Testnet (Wasm contract
+  `CBSOWXRDBW4BZ2WYGQWJN25U24BDXOTLAS4U7NURAMDTTBGB72CNSP5Y`:
+  instance 464,019 / code 461,764 ledgers remaining at ledger 5,940,620;
+  native XLM contract
+  `CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC`:
+  instance 2,897,040 remaining, no code entry).
+
 ## [0.4.0] - 2026-11-26
 
 ### Added

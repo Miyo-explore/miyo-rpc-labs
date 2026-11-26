@@ -116,6 +116,23 @@ fn run_check(args: CheckArgs) -> ExitCode {
         }
     }
 
+    // Validate --contract before doing any network work: it must be a
+    // well-formed contract strkey (C..., 56 chars, valid checksum).
+    let contract_id = match &args.contract {
+        Some(c) => match miyo_rpc::decode_contract_id(c) {
+            Ok(id) => Some(id),
+            Err(msg) => {
+                eprintln!("error: --contract is not a valid contract ID: {msg}");
+                return ExitCode::from(2);
+            }
+        },
+        None => None,
+    };
+    if args.method.as_deref() == Some("contractTtl") && contract_id.is_none() {
+        eprintln!("error: --contract is required when --method is contractTtl");
+        return ExitCode::from(2);
+    }
+
     // Validate params up-front (exit 2 on bad input) before any request.
     let params = parse_params(&args);
     let params_given = args.params.is_some() || args.params_file.is_some();
@@ -136,6 +153,11 @@ fn run_check(args: CheckArgs) -> ExitCode {
         if args.compare.is_some() {
             eprintln!(
                 "warning: --compare has no effect on a single arbitrary-method probe; not applied."
+            );
+        }
+        if args.contract.is_some() || args.ttl_threshold.is_some() {
+            eprintln!(
+                "warning: --contract/--ttl-threshold have no effect on a single arbitrary-method probe; not applied."
             );
         }
     } else if params_given {
@@ -163,6 +185,16 @@ fn run_check(args: CheckArgs) -> ExitCode {
         client_config = client_config.with_follow_redirects(false);
     }
 
+    let ttl = contract_id.map(|id| miyo_rpc::TtlCheckConfig {
+        contract_id: id,
+        threshold: args
+            .ttl_threshold
+            .unwrap_or(miyo_rpc::DEFAULT_TTL_THRESHOLD),
+    });
+    if ttl.is_none() && args.ttl_threshold.is_some() {
+        eprintln!("warning: --ttl-threshold has no effect without --contract; not applied.");
+    }
+
     let report = if arbitrary {
         let method = args.method.as_deref().expect("arbitrary implies --method");
         rt.block_on(async {
@@ -177,11 +209,12 @@ fn run_check(args: CheckArgs) -> ExitCode {
         })
     } else {
         let mut report = rt.block_on(async {
-            DiagnosticReport::run_all_with_config(
+            DiagnosticReport::run_all_with_config_and_contract(
                 &args.url,
                 client_config.clone(),
                 args.method.as_deref(),
                 runs,
+                ttl,
             )
             .await
         });
@@ -189,11 +222,12 @@ fn run_check(args: CheckArgs) -> ExitCode {
 
         if let Some(compare_url) = &args.compare {
             let compare_report = rt.block_on(async {
-                DiagnosticReport::run_all_with_config(
+                DiagnosticReport::run_all_with_config_and_contract(
                     compare_url,
                     client_config.clone(),
                     None,
                     runs,
+                    ttl,
                 )
                 .await
             });

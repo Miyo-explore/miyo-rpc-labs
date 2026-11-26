@@ -274,6 +274,12 @@ pub const GET_LEDGERS_PAGE_LIMIT: u64 = 2;
 /// it does not stream history.
 pub const GET_TRANSACTIONS_PAGE_LIMIT: u64 = 2;
 
+/// Default TTL threshold in ledgers for the `contractTtl` check
+/// (17280 ≈ 1 day at ~5 s per ledger), following the evergreen
+/// convention. Remaining ledgers at or below this threshold report
+/// `Warn`; the boundary is inclusive.
+pub const DEFAULT_TTL_THRESHOLD: u64 = 17280;
+
 /// Base64-encoded XDR of the `LedgerKey` probed by the built-in
 /// `getLedgerEntries` check: an Account key for the all-zero ed25519 key
 /// (union discriminant 0 = ACCOUNT, key type 0 = ED25519, 32 zero bytes).
@@ -306,6 +312,187 @@ fn parse_u64_field(result: &Value, field: &str) -> Option<u64> {
 /// (missing field, wrong type, unparseable string).
 fn parse_ledger_sequence(result: &Value) -> Option<u64> {
     parse_u64_field(result, "sequence")
+}
+
+const BASE64_ALPHABET: &[u8; 64] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/// Encode bytes as standard base64 (with `=` padding).
+///
+/// Implemented by hand: the crate has no base64 dependency, and the only
+/// base64 values the tool handles are XDR ledger keys / entry values.
+fn base64_encode(data: &[u8]) -> String {
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+        out.push(BASE64_ALPHABET[((n >> 18) & 63) as usize] as char);
+        out.push(BASE64_ALPHABET[((n >> 12) & 63) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            BASE64_ALPHABET[((n >> 6) & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            BASE64_ALPHABET[(n & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// Decode standard base64 (with or without `=` padding) into bytes.
+///
+/// Returns `None` on any character outside the alphabet, on bad padding,
+/// or on a non-canonical trailing bit pattern.
+fn base64_decode(input: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(input.len() * 3 / 4);
+    let mut acc: u32 = 0;
+    let mut bits: u32 = 0;
+    let mut padding = 0usize;
+    for c in input.bytes() {
+        if c == b'=' {
+            padding += 1;
+            continue;
+        }
+        if padding > 0 {
+            return None; // data after padding
+        }
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        } as u32;
+        acc = (acc << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    if padding > 2 || bits >= 6 || (bits > 0 && (acc & ((1u32 << bits) - 1)) != 0) {
+        return None;
+    }
+    Some(out)
+}
+
+/// A minimal big-endian XDR reader: the `contractTtl` check only needs to
+/// walk one known struct shape, not a general XDR decoder.
+struct XdrReader<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> XdrReader<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, pos: 0 }
+    }
+
+    fn read_i32(&mut self) -> Option<i32> {
+        let b = self.bytes.get(self.pos..self.pos + 4)?;
+        self.pos += 4;
+        Some(i32::from_be_bytes(b.try_into().ok()?))
+    }
+
+    fn read_bytes(&mut self, n: usize) -> Option<&'a [u8]> {
+        let b = self.bytes.get(self.pos..self.pos + n)?;
+        self.pos += n;
+        Some(b)
+    }
+}
+
+/// What a contract instance entry's executable is.
+///
+/// The `ContractCode` entry only exists for Wasm executables: a Stellar
+/// Asset Contract (or an external reference) has no Wasm hash and
+/// therefore no code entry to check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InstanceExecutable {
+    /// Wasm code: the 32-byte hash identifies the `ContractCode` entry.
+    Wasm([u8; 32]),
+    /// Stellar Asset Contract: no Wasm, no `ContractCode` entry exists.
+    StellarAsset,
+    /// External reference: no retrievable `ContractCode` entry.
+    ExternalRef,
+}
+
+/// Build the base64 XDR `LedgerKey` for a contract's instance entry:
+/// `ContractData` (discriminant 6) for the contract address, with the
+/// `LedgerKeyContractInstance` key (SCVal discriminant 20) and
+/// `PERSISTENT` durability.
+///
+/// Verified live 2026-11-27 against soroban-testnet.stellar.org: the RPC
+/// echoes this exact key back for the contract's instance entry.
+pub fn contract_instance_ledger_key(contract_id: &[u8; 32]) -> String {
+    let mut xdr = Vec::with_capacity(48);
+    xdr.extend_from_slice(&6i32.to_be_bytes()); // LedgerEntryType CONTRACT_DATA
+    xdr.extend_from_slice(&1i32.to_be_bytes()); // SCAddress CONTRACT
+    xdr.extend_from_slice(contract_id);
+    xdr.extend_from_slice(&20i32.to_be_bytes()); // SCVal LEDGER_KEY_CONTRACT_INSTANCE
+    xdr.extend_from_slice(&1i32.to_be_bytes()); // ContractDataDurability PERSISTENT
+    base64_encode(&xdr)
+}
+
+/// Build the base64 XDR `LedgerKey` for a contract's code entry:
+/// `ContractCode` (discriminant 7) for the Wasm hash.
+pub fn contract_code_ledger_key(wasm_hash: &[u8; 32]) -> String {
+    let mut xdr = Vec::with_capacity(36);
+    xdr.extend_from_slice(&7i32.to_be_bytes()); // LedgerEntryType CONTRACT_CODE
+    xdr.extend_from_slice(wasm_hash);
+    base64_encode(&xdr)
+}
+
+/// Parse the executable out of a contract instance entry's `xdr` value
+/// (base64-encoded `LedgerEntryData`).
+///
+/// Layout (verified live 2026-11-27 and against the Stellar XDR spec):
+/// `LedgerEntryData` discriminant 6 (`CONTRACT_DATA`), `ContractDataEntry`
+/// `ext` (ExtensionPoint, 0 = empty), `SCAddress` discriminant 1
+/// (`CONTRACT`) + 32-byte contract ID, `SCVal` discriminant 20
+/// (`LEDGER_KEY_CONTRACT_INSTANCE`), durability, `SCVal` discriminant 19
+/// (`CONTRACT_INSTANCE`), then the `ContractExecutable` discriminant:
+/// 0 = WASM (followed by the 32-byte Wasm hash), 1 = STELLAR_ASSET,
+/// 2 = EXTERNAL_REF. Returns `None` when the bytes do not parse as a
+/// contract instance entry.
+fn parse_instance_executable(entry_xdr_b64: &str) -> Option<InstanceExecutable> {
+    let bytes = base64_decode(entry_xdr_b64)?;
+    let mut r = XdrReader::new(&bytes);
+    if r.read_i32()? != 6 {
+        return None; // not a CONTRACT_DATA entry
+    }
+    if r.read_i32()? != 0 {
+        return None; // non-empty ExtensionPoint
+    }
+    if r.read_i32()? != 1 {
+        return None; // not a CONTRACT SCAddress
+    }
+    r.read_bytes(32)?; // contract ID
+    if r.read_i32()? != 20 {
+        return None; // not a LEDGER_KEY_CONTRACT_INSTANCE key
+    }
+    let _durability = r.read_i32()?;
+    if r.read_i32()? != 19 {
+        return None; // not a CONTRACT_INSTANCE value
+    }
+    match r.read_i32()? {
+        0 => {
+            let hash = r.read_bytes(32)?;
+            let mut wasm_hash = [0u8; 32];
+            wasm_hash.copy_from_slice(hash);
+            Some(InstanceExecutable::Wasm(wasm_hash))
+        }
+        1 => Some(InstanceExecutable::StellarAsset),
+        2 => Some(InstanceExecutable::ExternalRef),
+        _ => None,
+    }
 }
 
 /// A built-in check for the Stellar RPC `getEvents` method.
@@ -1438,6 +1625,382 @@ impl RpcCheck for SimulateTransactionCheck {
     }
 }
 
+/// Configuration for the `contractTtl` check: which contract to check
+/// and the Warn threshold in ledgers.
+#[derive(Debug, Clone, Copy)]
+pub struct TtlCheckConfig {
+    /// The contract to check, as 32 raw ID bytes.
+    pub contract_id: [u8; 32],
+    /// Warn threshold in ledgers (inclusive).
+    pub threshold: u64,
+}
+
+/// A built-in check for a contract's TTL (time-to-live) on the ledger.
+///
+/// Reads the contract's instance entry and its Wasm code entry via
+/// `getLedgerEntries` and reports how many ledgers remain until each
+/// expires: `liveUntilLedgerSeq` minus the latest ledger sequence
+/// (resolved via `getLatestLedger`, like the other derived checks).
+///
+/// Key construction (both keys are base64 XDR, see
+/// [`contract_instance_ledger_key`] / [`contract_code_ledger_key`]):
+/// the instance key is `ContractData` for the contract address with the
+/// `LedgerKeyContractInstance` key and `PERSISTENT` durability; the code
+/// key is `ContractCode` for the Wasm hash taken from the instance
+/// entry's executable. The Wasm hash is parsed out of the instance
+/// entry's `xdr` value (see [`parse_instance_executable`]).
+///
+/// Verdicts: a missing instance entry is a `Fail` (the contract is
+/// archived, expired, or never deployed); a missing code entry is a
+/// `Fail` as well. A Stellar Asset Contract (or an external reference)
+/// has no Wasm and therefore no code entry by design: the check then
+/// reports `code_remaining_ledgers` as `null` and judges by the instance
+/// entry alone. Remaining ledgers at or below `--ttl-threshold`
+/// (default [`DEFAULT_TTL_THRESHOLD`]) report `Warn` — the boundary is
+/// inclusive, consistent with the Warn tier: counted in `ran`, not in
+/// `passed`, exit code unchanged.
+///
+/// The check only runs when a contract was supplied (`--contract`): with
+/// no contract it reports `Skip`. It makes three RPC calls per run
+/// (`getLatestLedger` + two `getLedgerEntries`), all read-only.
+#[derive(Debug, Clone, Copy)]
+pub struct ContractTtlCheck {
+    /// The contract to check. `None` means no `--contract` was given:
+    /// the check reports `Skip`.
+    pub contract_id: Option<[u8; 32]>,
+    /// Warn threshold in ledgers (inclusive).
+    pub threshold: u64,
+}
+
+impl RpcCheck for ContractTtlCheck {
+    fn name(&self) -> &str {
+        "contractTtl"
+    }
+
+    fn run<'a>(
+        &'a self,
+        client: &'a RpcClient,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = CheckResult> + Send + 'a>> {
+        Box::pin(async move {
+            let endpoint = client.sanitized_url();
+            let timestamp = chrono::Utc::now().to_rfc3339();
+            let method = "contractTtl";
+
+            let contract_id = match self.contract_id {
+                Some(id) => id,
+                None => {
+                    return CheckResult {
+                        name: method.to_string(),
+                        status: CheckStatus::Skip,
+                        timestamp,
+                        duration_ms: None,
+                        http_status: None,
+                        endpoint: endpoint.clone(),
+                        details: None,
+                        error: None,
+                        error_message: None,
+                        evidence: Some(
+                            "No --contract given: pass --contract <C...> to check a contract's instance and code TTL."
+                                .to_string(),
+                        ),
+                    };
+                }
+            };
+            let contract_strkey = crate::network::encode_contract_id(&contract_id);
+
+            // 1. Resolve the latest ledger sequence.
+            let sequence = match client.call::<Value>("getLatestLedger", None).await {
+                Ok((_, result)) => match parse_ledger_sequence(&result) {
+                    Some(seq) => seq,
+                    None => {
+                        return fail_result(
+                            method,
+                            &endpoint,
+                            timestamp,
+                            &MiyoError::MalformedStructure(
+                                "getLatestLedger result has no usable 'sequence' field".to_string(),
+                            ),
+                            "Call getLatestLedger to resolve the latest ledger for contractTtl."
+                                .to_string(),
+                        );
+                    }
+                },
+                Err(e) => {
+                    return fail_result(
+                        method,
+                        &endpoint,
+                        timestamp,
+                        &e,
+                        "Call getLatestLedger to resolve the latest ledger for contractTtl before calling getLedgerEntries."
+                            .to_string(),
+                    );
+                }
+            };
+
+            // 2. Fetch the instance entry.
+            let instance_key = contract_instance_ledger_key(&contract_id);
+            let instance_params = serde_json::json!({
+                "keys": [instance_key],
+            });
+            let instance_evidence = format!(
+                "Sent JSON-RPC 2.0 POST to {endpoint} with method 'getLedgerEntries' and params {{keys: [<LedgerKey ContractData for contract {contract_strkey}, instance, persistent>]}}."
+            );
+            let (info, result) = match client
+                .call::<Value>("getLedgerEntries", Some(instance_params))
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    return fail_result(method, &endpoint, timestamp, &e, instance_evidence);
+                }
+            };
+            let entries = match result.get("entries").and_then(Value::as_array) {
+                Some(entries) => entries,
+                None => {
+                    return fail_result(
+                        method,
+                        &endpoint,
+                        timestamp,
+                        &MiyoError::MalformedStructure(
+                            "getLedgerEntries result has no 'entries' array".to_string(),
+                        ),
+                        instance_evidence,
+                    );
+                }
+            };
+            let instance = entries
+                .iter()
+                .find(|e| e.get("key").and_then(Value::as_str) == Some(instance_key.as_str()));
+            let instance = match instance {
+                Some(entry) => entry,
+                None => {
+                    return fail_result(
+                        method,
+                        &endpoint,
+                        timestamp,
+                        &MiyoError::MissingField(format!(
+                            "contract instance entry not found for {contract_strkey} (contract may be archived, expired, or never deployed)"
+                        )),
+                        instance_evidence,
+                    );
+                }
+            };
+            let instance_live = match parse_u64_field(instance, "liveUntilLedgerSeq") {
+                Some(live) => live,
+                None => {
+                    return fail_result(
+                        method,
+                        &endpoint,
+                        timestamp,
+                        &MiyoError::MalformedStructure(
+                            "contract instance entry has no usable 'liveUntilLedgerSeq' field"
+                                .to_string(),
+                        ),
+                        instance_evidence,
+                    );
+                }
+            };
+            let instance_remaining = instance_live.saturating_sub(sequence);
+            let instance_xdr = instance.get("xdr").and_then(Value::as_str).unwrap_or("");
+            let executable = match parse_instance_executable(instance_xdr) {
+                Some(executable) => executable,
+                None => {
+                    return fail_result(
+                        method,
+                        &endpoint,
+                        timestamp,
+                        &MiyoError::MalformedStructure(
+                            "contract instance entry 'xdr' does not parse as a contract instance entry"
+                                .to_string(),
+                        ),
+                        instance_evidence,
+                    );
+                }
+            };
+
+            // 3. Fetch the code entry — only Wasm executables have one.
+            let mut duration_ms = info.duration.as_millis() as u64;
+            let mut http_status = info.status;
+            let (code_remaining, code_live, code_wasm_hash, code_executable) = match executable {
+                InstanceExecutable::Wasm(wasm_hash) => {
+                    let code_key = contract_code_ledger_key(&wasm_hash);
+                    let code_params = serde_json::json!({
+                        "keys": [code_key],
+                    });
+                    let code_evidence = format!(
+                            "Sent JSON-RPC 2.0 POST to {endpoint} with method 'getLedgerEntries' and params {{keys: [<LedgerKey ContractCode for wasm hash {}>]}}.",
+                            wasm_hash.iter().map(|b| format!("{b:02x}")).collect::<String>()
+                        );
+                    let (code_info, code_result) = match client
+                        .call::<Value>("getLedgerEntries", Some(code_params))
+                        .await
+                    {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return fail_result(method, &endpoint, timestamp, &e, code_evidence);
+                        }
+                    };
+                    duration_ms = code_info.duration.as_millis() as u64;
+                    http_status = code_info.status;
+                    let code_entries = match code_result.get("entries").and_then(Value::as_array) {
+                        Some(entries) => entries,
+                        None => {
+                            return fail_result(
+                                method,
+                                &endpoint,
+                                timestamp,
+                                &MiyoError::MalformedStructure(
+                                    "getLedgerEntries result has no 'entries' array".to_string(),
+                                ),
+                                code_evidence,
+                            );
+                        }
+                    };
+                    let code = code_entries
+                        .iter()
+                        .find(|e| e.get("key").and_then(Value::as_str) == Some(code_key.as_str()));
+                    let code = match code {
+                        Some(entry) => entry,
+                        None => {
+                            return fail_result(
+                                method,
+                                &endpoint,
+                                timestamp,
+                                &MiyoError::MissingField(format!(
+                                    "contract code entry not found for wasm hash {}",
+                                    wasm_hash
+                                        .iter()
+                                        .map(|b| format!("{b:02x}"))
+                                        .collect::<String>()
+                                )),
+                                code_evidence,
+                            );
+                        }
+                    };
+                    let code_live = match parse_u64_field(code, "liveUntilLedgerSeq") {
+                        Some(live) => live,
+                        None => {
+                            return fail_result(
+                                method,
+                                &endpoint,
+                                timestamp,
+                                &MiyoError::MalformedStructure(
+                                    "contract code entry has no usable 'liveUntilLedgerSeq' field"
+                                        .to_string(),
+                                ),
+                                code_evidence,
+                            );
+                        }
+                    };
+                    (
+                        Some(code_live.saturating_sub(sequence)),
+                        Some(code_live),
+                        Some(
+                            wasm_hash
+                                .iter()
+                                .map(|b| format!("{b:02x}"))
+                                .collect::<String>(),
+                        ),
+                        "wasm",
+                    )
+                }
+                InstanceExecutable::StellarAsset => (None, None, None, "stellar_asset"),
+                InstanceExecutable::ExternalRef => (None, None, None, "external_ref"),
+            };
+
+            // 4. Verdict: the smallest remaining value decides; the
+            // threshold boundary is inclusive (remaining <= threshold
+            // warns), consistent with the Warn tier.
+            let min_remaining = [Some(instance_remaining), code_remaining]
+                .into_iter()
+                .flatten()
+                .min()
+                .unwrap_or(u64::MAX);
+            let status = if min_remaining <= self.threshold {
+                CheckStatus::Warn
+            } else {
+                CheckStatus::Pass
+            };
+
+            let mut details = serde_json::Map::new();
+            details.insert(
+                "description".to_string(),
+                Value::String(
+                    "Contract instance and code TTL (remaining ledgers until expiry).".to_string(),
+                ),
+            );
+            details.insert(
+                "http_status".to_string(),
+                Value::Number(serde_json::Number::from(http_status)),
+            );
+            details.insert(
+                "contract".to_string(),
+                Value::String(contract_strkey.clone()),
+            );
+            details.insert(
+                "latest_ledger".to_string(),
+                Value::Number(serde_json::Number::from(sequence)),
+            );
+            details.insert(
+                "ttl_threshold".to_string(),
+                Value::Number(serde_json::Number::from(self.threshold)),
+            );
+            details.insert(
+                "instance_live_ledger".to_string(),
+                Value::Number(serde_json::Number::from(instance_live)),
+            );
+            details.insert(
+                "instance_remaining_ledgers".to_string(),
+                Value::Number(serde_json::Number::from(instance_remaining)),
+            );
+            details.insert(
+                "code_executable".to_string(),
+                Value::String(code_executable.to_string()),
+            );
+            match (code_live, code_remaining) {
+                (Some(live), Some(remaining)) => {
+                    details.insert(
+                        "code_live_ledger".to_string(),
+                        Value::Number(serde_json::Number::from(live)),
+                    );
+                    details.insert(
+                        "code_remaining_ledgers".to_string(),
+                        Value::Number(serde_json::Number::from(remaining)),
+                    );
+                }
+                _ => {
+                    details.insert("code_remaining_ledgers".to_string(), Value::Null);
+                }
+            }
+            if let Some(hash) = &code_wasm_hash {
+                details.insert("code_wasm_hash".to_string(), Value::String(hash.clone()));
+            }
+
+            let evidence = match (code_live, code_remaining) {
+                (Some(live), Some(remaining)) => format!(
+                    "Checked contract {contract_strkey} TTL: getLatestLedger (latest {sequence}), getLedgerEntries with LedgerKey ContractData (instance, persistent; liveUntilLedgerSeq {instance_live}, {instance_remaining} ledgers remaining) and LedgerKey ContractCode (liveUntilLedgerSeq {live}, {remaining} ledgers remaining)."
+                ),
+                _ => format!(
+                    "Checked contract {contract_strkey} TTL: getLatestLedger (latest {sequence}), getLedgerEntries with LedgerKey ContractData (instance, persistent; liveUntilLedgerSeq {instance_live}, {instance_remaining} ledgers remaining); no ContractCode entry exists for a {code_executable} executable, judged by the instance entry alone."
+                ),
+            };
+
+            CheckResult {
+                name: method.to_string(),
+                status,
+                timestamp,
+                duration_ms: Some(duration_ms),
+                http_status: Some(http_status),
+                endpoint: endpoint.clone(),
+                details: Some(details),
+                error: None,
+                error_message: None,
+                evidence: Some(evidence),
+            }
+        })
+    }
+}
+
 /// Check raw HTTP connectivity and status code — independent of JSON-RPC.
 ///
 /// `follow_redirects` mirrors the `RpcClient` policy: follow by default, but
@@ -1634,6 +2197,11 @@ fn fail_result(
 /// transaction of the latest ledger by hash (see [`GetTransactionCheck`]);
 /// `simulateTransaction` replays an embedded Testnet probe transaction
 /// (see [`SimulateTransactionCheck`]).
+///
+/// `contractTtl` is NOT in this list: it only runs when a contract was
+/// supplied (`--contract`) or explicitly requested (`--method
+/// contractTtl`) — see [`all_checks_with_ttl`]. Default runs therefore
+/// keep exactly the 12 checks they had before the TTL check existed.
 pub fn all_checks() -> Vec<Box<dyn RpcCheck + Send + Sync>> {
     vec![
         Box::new(SimpleMethodCheck {
@@ -1666,6 +2234,27 @@ pub fn all_checks() -> Vec<Box<dyn RpcCheck + Send + Sync>> {
     ]
 }
 
+/// The default check list plus the `contractTtl` check, when it applies.
+///
+/// The TTL check is appended when a contract was supplied (`ttl` is
+/// `Some`) or when it was explicitly requested (`method_filter` is
+/// `Some("contractTtl")` — in which case it runs unconfigured and
+/// reports `Skip`). Otherwise the list is exactly [`all_checks`], so
+/// default runs keep their 12 checks.
+pub fn all_checks_with_ttl(
+    ttl: Option<TtlCheckConfig>,
+    method_filter: Option<&str>,
+) -> Vec<Box<dyn RpcCheck + Send + Sync>> {
+    let mut checks = all_checks();
+    if ttl.is_some() || method_filter == Some("contractTtl") {
+        checks.push(Box::new(ContractTtlCheck {
+            contract_id: ttl.map(|t| t.contract_id),
+            threshold: ttl.map(|t| t.threshold).unwrap_or(DEFAULT_TTL_THRESHOLD),
+        }));
+    }
+    checks
+}
+
 /// Names of the methods that have a dedicated built-in check.
 pub const BUILTIN_METHODS: &[&str] = &[
     "getHealth",
@@ -1679,6 +2268,7 @@ pub const BUILTIN_METHODS: &[&str] = &[
     "getFeeStats",
     "getTransaction",
     "simulateTransaction",
+    "contractTtl",
 ];
 
 /// Whether `name` refers to one of the built-in checks ([`BUILTIN_METHODS`]).
@@ -1850,6 +2440,22 @@ impl DiagnosticReport {
         method_filter: Option<&str>,
         runs: usize,
     ) -> Self {
+        Self::run_all_with_config_and_contract(url, config, method_filter, runs, None).await
+    }
+
+    /// Run all diagnostic checks with an explicit [`RpcClientConfig`] and
+    /// an optional TTL check configuration.
+    ///
+    /// Same as [`run_all_with_config`](Self::run_all_with_config), but
+    /// when `ttl` is `Some` the `contractTtl` check runs against that
+    /// contract (see [`all_checks_with_ttl`]).
+    pub async fn run_all_with_config_and_contract(
+        url: &str,
+        config: RpcClientConfig,
+        method_filter: Option<&str>,
+        runs: usize,
+        ttl: Option<TtlCheckConfig>,
+    ) -> Self {
         let endpoint = sanitize_url(url);
         let timeout = config.timeout;
         let user_agent = config.user_agent.clone();
@@ -1860,7 +2466,7 @@ impl DiagnosticReport {
                 // Can't even build a client — every check fails.
                 let timestamp = chrono::Utc::now().to_rfc3339();
 
-                let mut checks: Vec<CheckResult> = all_checks()
+                let mut checks: Vec<CheckResult> = all_checks_with_ttl(ttl, method_filter)
                     .iter()
                     .map(|c| {
                         fail_result(
@@ -1898,7 +2504,7 @@ impl DiagnosticReport {
             let mut run_results: Vec<CheckResult> =
                 vec![http_connectivity_check(url, timeout, &user_agent, follow_redirects).await];
 
-            let checks = all_checks();
+            let checks = all_checks_with_ttl(ttl, method_filter);
             for check in &checks {
                 if let Some(m) = method_filter {
                     if m != check.name() {
@@ -2993,11 +3599,124 @@ mod tests {
     }
 
     #[test]
+    fn test_base64_round_trip() {
+        for bytes in [
+            vec![],
+            vec![0u8],
+            vec![0xff; 32],
+            (0u8..=255).collect::<Vec<u8>>(),
+        ] {
+            assert_eq!(base64_decode(&base64_encode(&bytes)).unwrap(), bytes);
+        }
+        assert_eq!(base64_encode(&[0xfb, 0xff, 0xfe]), "+//+");
+        assert_eq!(base64_encode(&[0xfb, 0xff]), "+/8=");
+        assert_eq!(base64_encode(&[0xfb]), "+w==");
+        assert!(base64_decode("not!base64").is_none());
+        assert!(base64_decode("AB=C").is_none());
+    }
+
+    /// The native XLM Stellar Asset Contract on Testnet, verified live
+    /// 2026-11-27. Its instance key is the exact value the RPC echoed
+    /// back for this contract's instance entry — an independent check of
+    /// the key construction, not a self-comparison.
+    const SAC_CONTRACT_ID: [u8; 32] = [
+        0xd7, 0x92, 0x8b, 0x72, 0xc2, 0x70, 0x3c, 0xcf, 0xea, 0xf7, 0xeb, 0x9f, 0xf4, 0xef, 0x4d,
+        0x50, 0x4a, 0x55, 0xa8, 0xb9, 0x79, 0xfc, 0x9b, 0x45, 0x0e, 0xa2, 0xc8, 0x42, 0xb4, 0xd1,
+        0xce, 0x61,
+    ];
+
+    /// A real Wasm contract on Testnet, verified live 2026-11-27, with its
+    /// Wasm hash from the instance entry's executable.
+    const WASM_CONTRACT_ID: [u8; 32] = [
+        0x64, 0xeb, 0x5e, 0x23, 0x0d, 0xb8, 0x1c, 0xea, 0xd8, 0x34, 0x2c, 0x96, 0xeb, 0xb4, 0xd7,
+        0x02, 0x3b, 0xba, 0x6b, 0x04, 0xb9, 0x4f, 0xb6, 0x91, 0x03, 0x07, 0x39, 0x84, 0xc1, 0xfe,
+        0x84, 0xd9,
+    ];
+    const WASM_HASH: [u8; 32] = [
+        0xe3, 0x2b, 0xa3, 0xf3, 0xfd, 0x4a, 0x97, 0x32, 0x3a, 0x1a, 0xe5, 0x1b, 0x10, 0xc6, 0xc0,
+        0x32, 0x6a, 0xfe, 0xd8, 0x50, 0xa9, 0x7d, 0x6b, 0x81, 0x1a, 0x50, 0xe8, 0xd2, 0x0e, 0x67,
+        0x9c, 0xa9,
+    ];
+
+    #[test]
+    fn test_contract_instance_ledger_key_matches_live_echo() {
+        // The RPC echoed this exact key for the SAC's instance entry.
+        assert_eq!(
+            contract_instance_ledger_key(&SAC_CONTRACT_ID),
+            "AAAABgAAAAHXkotywnA8z+r365/0701QSlWouXn8m0UOoshCtNHOYQAAABQAAAAB"
+        );
+        assert_eq!(
+            contract_instance_ledger_key(&WASM_CONTRACT_ID),
+            "AAAABgAAAAFk614jDbgc6tg0LJbrtNcCO7prBLlPtpEDBzmEwf6E2QAAABQAAAAB"
+        );
+    }
+
+    #[test]
+    fn test_contract_code_ledger_key() {
+        assert_eq!(
+            contract_code_ledger_key(&WASM_HASH),
+            "AAAAB+Mro/P9SpcyOhrlGxDGwDJq/thQqX1rgRpQ6NIOZ5yp"
+        );
+    }
+
+    /// Build an instance entry's `xdr` value from the documented layout
+    /// (used as a fixture for the parser tests, not by the check itself).
+    fn instance_entry_xdr(contract_id: &[u8; 32], executable: InstanceExecutable) -> String {
+        let mut xdr = Vec::new();
+        xdr.extend_from_slice(&6i32.to_be_bytes());
+        xdr.extend_from_slice(&0i32.to_be_bytes());
+        xdr.extend_from_slice(&1i32.to_be_bytes());
+        xdr.extend_from_slice(contract_id);
+        xdr.extend_from_slice(&20i32.to_be_bytes());
+        xdr.extend_from_slice(&1i32.to_be_bytes());
+        xdr.extend_from_slice(&19i32.to_be_bytes());
+        match executable {
+            InstanceExecutable::Wasm(hash) => {
+                xdr.extend_from_slice(&0i32.to_be_bytes());
+                xdr.extend_from_slice(&hash);
+            }
+            InstanceExecutable::StellarAsset => xdr.extend_from_slice(&1i32.to_be_bytes()),
+            InstanceExecutable::ExternalRef => xdr.extend_from_slice(&2i32.to_be_bytes()),
+        }
+        base64_encode(&xdr)
+    }
+
+    #[test]
+    fn test_parse_instance_executable() {
+        assert_eq!(
+            parse_instance_executable(&instance_entry_xdr(
+                &WASM_CONTRACT_ID,
+                InstanceExecutable::Wasm(WASM_HASH)
+            )),
+            Some(InstanceExecutable::Wasm(WASM_HASH))
+        );
+        assert_eq!(
+            parse_instance_executable(&instance_entry_xdr(
+                &SAC_CONTRACT_ID,
+                InstanceExecutable::StellarAsset
+            )),
+            Some(InstanceExecutable::StellarAsset)
+        );
+        assert_eq!(
+            parse_instance_executable(&instance_entry_xdr(
+                &SAC_CONTRACT_ID,
+                InstanceExecutable::ExternalRef
+            )),
+            Some(InstanceExecutable::ExternalRef)
+        );
+        // Wrong discriminant, truncated bytes, and non-base64 are rejected.
+        assert_eq!(parse_instance_executable("AAAABw=="), None);
+        assert_eq!(parse_instance_executable("AAAAAA=="), None);
+        assert_eq!(parse_instance_executable("not-base64!"), None);
+        assert_eq!(parse_instance_executable(""), None);
+    }
+
+    #[test]
     fn test_get_events_check_name_and_page_limit() {
         assert_eq!(GetEventsCheck.name(), "getEvents");
         assert_eq!(GET_EVENTS_PAGE_LIMIT, 10);
         assert!(is_builtin_method("getEvents"));
-        assert_eq!(BUILTIN_METHODS.len(), 11);
+        assert_eq!(BUILTIN_METHODS.len(), 12);
         let checks = all_checks();
         let names: Vec<&str> = checks.iter().map(|c| c.name()).collect();
         assert_eq!(

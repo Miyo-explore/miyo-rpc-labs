@@ -69,6 +69,7 @@ method check in isolation (the HTTP connectivity check always runs regardless).
 | `getFeeStats`      | `getFeeStats`     | Fee statistics for recent ledgers (inclusion fee percentiles).     |
 | `getTransaction`   | `getTransaction`  | Single transaction by hash (first transaction in the latest ledger).|
 | `simulateTransaction` | `simulateTransaction` | Simulates a real InvokeHostFunction transaction (Testnet probe, replayed; Skips on other networks). |
+| `contractTtl` | `getLedgerEntries` | Remaining ledgers until a contract's instance and code entries expire. Only runs with `--contract <C...>`; Warns at/below `--ttl-threshold` (default 17280). |
 
 Status semantics and limitations: [docs/checks.md](docs/checks.md).
 
