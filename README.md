@@ -16,6 +16,7 @@ endpoint verification toolkit.
 - [Installation](#installation)
 - [Usage](#usage)
 - [Documentation](#documentation)
+- [Used by](#used-by)
 - [Contributing](#contributing)
 - [License](#license)
 - [Status](#status)
@@ -121,6 +122,10 @@ Full flag reference, exit codes, and output notes:
 - [Development](docs/development.md) — running tests, live validation, reporting issues.
 - [Endpoint Report (2026-12)](docs/ENDPOINT-REPORT-2026-12.md) — live run against public Stellar RPC endpoints.
 - [Endpoint Report (2026-11)](docs/ENDPOINT-REPORT-2026-11.md) — live run against public Stellar RPC endpoints.
+
+## Used by
+
+- [4evergent](https://github.com/naninu123/4evergent) — runs `miyo-rpc check` as a daily scheduled health check of its Testnet Soroban RPC endpoint ([workflow](https://github.com/naninu123/4evergent/blob/main/.github/workflows/rpc-health.yml)).
 
 ## Contributing
 
