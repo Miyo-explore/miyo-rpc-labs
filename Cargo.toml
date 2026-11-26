@@ -1,6 +1,6 @@
 [package]
 name = "miyo-rpc"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 description = "Stellar RPC diagnostics and compatibility testing toolkit"
 license = "Apache-2.0"
