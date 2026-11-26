@@ -40,30 +40,29 @@ Do not suppress warnings or skip tests to obtain a green CI result.
 4. Open a PR with a clear description of the problem and the fix.
 5. Wait for CI to pass. Do not merge until CI is green.
 
-## Drips Wave tasks
+## Good first issues
 
-Some issues are funded through [Drips Wave](https://www.drips.network/)
-and carry the `drips-wave` label plus one `complexity:*` label, which sets
-the reward for the task:
+Issues labelled `good first issue` are small, well-scoped tasks suitable
+for a first contribution. Each one also carries one `complexity:*` label
+so you can judge the size before picking it up:
 
-| Label | Reward |
+| Label | Meaning |
 | --- | --- |
-| `complexity: trivial` | 100 pts |
-| `complexity: medium` | 150 pts |
-| `complexity: high` | 200 pts |
+| `complexity: trivial` | Small, well-scoped change |
+| `complexity: medium` | Moderate change, some design decisions |
+| `complexity: high` | Large change, new feature or cross-cutting work |
 
-How to take a Wave task:
+How to take a task:
 
-1. Pick an open issue labelled `drips-wave` and comment that you are
+1. Pick an open issue labelled `good first issue` and comment that you are
    taking it, so two people do not work on the same task.
 2. Fork the repo and create a branch from `main` (`feat/...`, `fix/...`,
    `test/...`, or `docs/...`).
 3. Implement the change with tests. Use the issue template
-   (`.github/ISSUE_TEMPLATE/drips_wave_task.md`) acceptance criteria as
+   (`.github/ISSUE_TEMPLATE/contributor_task.md`) acceptance criteria as
    your checklist.
 4. Open a PR that links the issue (`Closes #N`) and wait for CI to go
    green and for a maintainer review. Do not merge until CI is green.
-5. Rewards for completed Wave tasks are paid in Stellar USDC via Drips.
 
 ## License
 

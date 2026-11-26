@@ -1,7 +1,30 @@
 # Miyo RPC Labs
 
+[![CI](https://github.com/Miyo-explore/miyo-rpc-labs/actions/workflows/ci.yml/badge.svg)](https://github.com/Miyo-explore/miyo-rpc-labs/actions/workflows/ci.yml)
+[![Release](https://github.com/Miyo-explore/miyo-rpc-labs/actions/workflows/release.yml/badge.svg)](https://github.com/Miyo-explore/miyo-rpc-labs/actions/workflows/release.yml)
+[![GitHub release](https://img.shields.io/github/v/release/Miyo-explore/miyo-rpc-labs)](https://github.com/Miyo-explore/miyo-rpc-labs/releases)
+[![License](https://img.shields.io/github/license/Miyo-explore/miyo-rpc-labs)](LICENSE)
+
 Open-source Stellar JSON-RPC diagnostics, compatibility testing, and reproducible
 endpoint verification toolkit.
+
+## Contents
+
+- [What It Does](#what-it-does)
+- [Why](#why)
+- [Supported Checks](#supported-checks)
+- [Installation](#installation)
+- [Usage](#usage)
+- [Network Identity Validation](#network-identity-validation)
+- [Repeated Probes and Latency Statistics](#repeated-probes-and-latency-statistics)
+- [Arbitrary Method Probing](#arbitrary-method-probing)
+- [Examples](#examples)
+- [Testing](#testing)
+- [Reporting Issues](#reporting-issues)
+- [Contributing](#contributing)
+- [License](#license)
+- [Batch Mode](#batch-mode)
+- [Status](#status)
 
 ## What It Does
 
@@ -550,6 +573,15 @@ To report a reproducible compatibility issue:
    a GitHub issue.
 3. Include the `tool_version` and the `total_runs` field from the report when
    relevant.
+
+## Contributing
+
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the
+development setup, code-quality gates (`cargo fmt`, `cargo clippy -D warnings`,
+`cargo test`), and the pull-request process. Good first issues are labelled
+`good first issue` and carry a `complexity:*` label so you can judge the size
+before picking one up. All behaviour is covered by the
+[Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## License
 
