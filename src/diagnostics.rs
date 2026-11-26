@@ -808,10 +808,15 @@ impl RpcCheck for GetTransactionsCheck {
 }
 
 /// Check raw HTTP connectivity and status code — independent of JSON-RPC.
+///
+/// `follow_redirects` mirrors the `RpcClient` policy: follow by default, but
+/// when false (the `--no-follow-redirects` flag) a 3xx response is reported
+/// as a redirect failure instead of being followed to a different host.
 pub async fn http_connectivity_check(
     url: &str,
     timeout: Duration,
     user_agent: &str,
+    follow_redirects: bool,
 ) -> CheckResult {
     let endpoint = sanitize_url(url);
     let timestamp = chrono::Utc::now().to_rfc3339();
@@ -820,6 +825,11 @@ pub async fn http_connectivity_check(
     // We use a plain reqwest client here (not RpcClient) to check raw HTTP.
     let client = match reqwest::Client::builder()
         .timeout(timeout)
+        .redirect(if follow_redirects {
+            reqwest::redirect::Policy::default()
+        } else {
+            reqwest::redirect::Policy::none()
+        })
         .user_agent(user_agent)
         .build()
     {
@@ -842,6 +852,46 @@ pub async fn http_connectivity_check(
     match response {
         Ok(resp) => {
             let status = resp.status().as_u16();
+
+            // With redirect following disabled, a 3xx is a failure, not a
+            // silently-followed hop: the probe never reached the endpoint
+            // itself, so it cannot vouch for the endpoint's reachability.
+            if !follow_redirects && (300..400).contains(&status) {
+                let location = resp
+                    .headers()
+                    .get(reqwest::header::LOCATION)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("<no Location header>")
+                    .to_string();
+
+                let mut details = serde_json::Map::new();
+                details.insert("endpoint_reachable".to_string(), Value::Bool(true));
+                details.insert(
+                    "http_status".to_string(),
+                    Value::Number(serde_json::Number::from(status)),
+                );
+                details.insert(
+                    "redirect_location".to_string(),
+                    Value::String(location.clone()),
+                );
+
+                return CheckResult {
+                    name: method.to_string(),
+                    status: CheckStatus::Fail,
+                    timestamp,
+                    duration_ms: Some(duration.as_millis() as u64),
+                    http_status: Some(status),
+                    endpoint: endpoint.clone(),
+                    details: Some(details),
+                    error: Some(IssueCategory::HttpError),
+                    error_message: Some(format!(
+                        "HTTP {status} — redirect not followed (--no-follow-redirects)"
+                    )),
+                    evidence: Some(format!(
+                        "Issued HTTP GET to {endpoint} with timeout {timeout:?} and User-Agent '{user_agent}'; server answered HTTP {status} with Location: {location} — redirect not followed because --no-follow-redirects is set."
+                    )),
+                };
+            }
 
             let mut details = serde_json::Map::new();
             details.insert("endpoint_reachable".to_string(), Value::Bool(true));
@@ -1157,6 +1207,7 @@ impl DiagnosticReport {
         let endpoint = sanitize_url(url);
         let timeout = config.timeout;
         let user_agent = config.user_agent.clone();
+        let follow_redirects = config.follow_redirects;
         let client = match RpcClient::new(url, config) {
             Ok(c) => c,
             Err(e) => {
@@ -1177,7 +1228,10 @@ impl DiagnosticReport {
                     .collect();
 
                 // Also add HTTP connectivity as a check.
-                checks.insert(0, http_connectivity_check(url, timeout, &user_agent).await);
+                checks.insert(
+                    0,
+                    http_connectivity_check(url, timeout, &user_agent, follow_redirects).await,
+                );
 
                 // Client initialization failed — no retry loop was executed.
                 // Report completed runs as 1 (the single connectivity attempt).
@@ -1196,7 +1250,7 @@ impl DiagnosticReport {
         let mut per_run: Vec<Vec<CheckResult>> = Vec::with_capacity(runs);
         for _ in 0..runs {
             let mut run_results: Vec<CheckResult> =
-                vec![http_connectivity_check(url, timeout, &user_agent).await];
+                vec![http_connectivity_check(url, timeout, &user_agent, follow_redirects).await];
 
             let checks = all_checks();
             for check in &checks {
@@ -1279,12 +1333,14 @@ impl DiagnosticReport {
         let endpoint = sanitize_url(url);
         let timeout = config.timeout;
         let user_agent = config.user_agent.clone();
+        let follow_redirects = config.follow_redirects;
         let client = match RpcClient::new(url, config) {
             Ok(c) => c,
             Err(e) => {
                 let timestamp = chrono::Utc::now().to_rfc3339();
-                let mut checks: Vec<CheckResult> =
-                    vec![http_connectivity_check(url, timeout, &user_agent).await];
+                let mut checks: Vec<CheckResult> = vec![
+                    http_connectivity_check(url, timeout, &user_agent, follow_redirects).await,
+                ];
                 checks.push(fail_result(
                     method,
                     &endpoint,
@@ -1305,7 +1361,8 @@ impl DiagnosticReport {
 
         let mut per_run: Vec<Vec<CheckResult>> = Vec::with_capacity(runs);
         for _ in 0..runs {
-            let mut run_results = vec![http_connectivity_check(url, timeout, &user_agent).await];
+            let mut run_results =
+                vec![http_connectivity_check(url, timeout, &user_agent, follow_redirects).await];
             let probe = ArbitraryMethodCheck {
                 method_name: method.to_string(),
                 params: params.clone(),

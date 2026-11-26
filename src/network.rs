@@ -9,7 +9,7 @@
 
 /// Known Stellar network passphrases, in canonical `(name, passphrase)` order.
 pub static NETWORK_PASSPHRASES: &[(&str, &str)] = &[
-    ("testnet", "Test SDF Network ; February 2023"),
+    ("testnet", "Test SDF Network ; September 2015"),
     ("mainnet", "Public Global Stellar Network ; September 2015"),
     ("futurenet", "Test SDF Future Network ; October 2022"),
 ];
@@ -35,7 +35,7 @@ mod tests {
     fn test_known_passphrases() {
         assert_eq!(
             network_passphrase("testnet"),
-            Some("Test SDF Network ; February 2023")
+            Some("Test SDF Network ; September 2015")
         );
         assert_eq!(
             network_passphrase("mainnet"),
@@ -51,7 +51,7 @@ mod tests {
     fn test_case_insensitive_lookup() {
         assert_eq!(
             network_passphrase("TESTNET"),
-            Some("Test SDF Network ; February 2023")
+            Some("Test SDF Network ; September 2015")
         );
         assert_eq!(
             network_passphrase("MainNet"),

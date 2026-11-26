@@ -110,7 +110,7 @@ benchmarking) are documented in the README "Limitations" section.
 | Arbitrary JSON-RPC method probing (`--method` + `--params` / `--params-file`) | Implemented | `src/diagnostics.rs`, `src/cli.rs` |
 | HTTP 429 classified as `rate_limited` (+ `Retry-After` in `details`) | Implemented | `src/error.rs`, `src/diagnostics.rs` |
 | `--user-agent` override + `--max-response-bytes` cap (`check`-only) | Implemented | `src/cli.rs`, `src/diagnostics.rs` |
-| `--no-follow-redirects` (`check`-only; `httpConnectivity` still follows) | Implemented | `src/cli.rs`, `src/diagnostics.rs` |
+| `--no-follow-redirects` (`check`-only; `httpConnectivity` honours it too) | Implemented | `src/cli.rs`, `src/diagnostics.rs` |
 | `futurenet` known network for `--expected-network` | Implemented | `src/network.rs` |
 | `batch --output human` + per-endpoint timeout (docs + tests) | Implemented | `src/output.rs`, `src/main.rs` |
 | `NO_COLOR` + non-TTY color gating in human output | Implemented | `src/output.rs` |
