@@ -24,7 +24,7 @@ This project ships **two decoupled version numbers**:
   Consumers MUST read `schema_version` and MUST ignore fields they do not
   recognize.
 
-## [Unreleased]
+## [0.3.1] - 2026-11-26
 
 ### Fixed
 - Testnet network passphrase corrected to `Test SDF Network ; September 2015`
