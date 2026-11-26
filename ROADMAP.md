@@ -50,7 +50,7 @@ v0.1.0 resolves the original roadmap gaps: network-identity validation
 for cross-endpoint divergence, machine-readable `schema_version` (`"1.0"`),
 URL sanitization, and a CI + release workflow now ship. By-design scope limits
 for the current release (plain-`GET` connectivity semantics, only eleven built-in
-JSON-RPC methods, no provider-specific error taxonomy, no sustained
+JSON-RPC methods, no sustained
 benchmarking) are documented in the README "Limitations" section.
 
 ## 3. Scope and Design Principles
@@ -60,7 +60,7 @@ benchmarking) are documented in the README "Limitations" section.
 - Diagnose endpoint reachability and JSON-RPC method support.
 - Classify each failure into a coarse `IssueCategory` and surface a precise
   message + evidence string.
-- Aggregate repeated-run results with deterministic precedence (`Fail > Skip > Pass`).
+- Aggregate repeated-run results with deterministic precedence (`Fail > Warn > Skip > Pass`).
 - Emit human-readable and JSON reports suitable for CI consumption (exit codes
   encode pass/fail).
 

@@ -5520,7 +5520,8 @@ async fn test_http_429_retry_after_http_date() {
     );
 }
 
-/// A 429 without `Retry-After` still classifies correctly and adds no detail keys.
+/// A 429 without `Retry-After` still classifies correctly and adds no
+/// retry detail keys — only the error shape.
 #[tokio::test]
 async fn test_http_429_without_retry_after() {
     let mut server = mockito::Server::new_async().await;
@@ -5542,9 +5543,15 @@ async fn test_http_429_without_retry_after() {
         .expect("getHealth check present");
 
     assert_eq!(check.error, Some(miyo_rpc::IssueCategory::RateLimited));
+    let details = check.details.as_ref().expect("details present");
+    assert_eq!(details.get("error_shape"), Some(&json!("rate_limited")));
     assert!(
-        check.details.is_none(),
-        "no details must be added when Retry-After is absent"
+        details.get("retry_after").is_none(),
+        "no retry_after must be added when the header is absent"
+    );
+    assert!(
+        details.get("retry_after_secs").is_none(),
+        "no retry_after_secs must be added when the header is absent"
     );
 }
 
@@ -5688,5 +5695,353 @@ async fn test_batch_timeout_applies_per_endpoint() {
     assert!(
         json.contains("timed out after 1s"),
         "failing checks must report the 1s timeout, got: {json}"
+    );
+}
+
+// ────────────────────────────
+// Provider error taxonomy (#35)
+// ────────────────────────────
+
+/// The `error_shape` recorded in a failed check's `details`, if any.
+fn error_shape_of(report: &DiagnosticReport, name: &str) -> Option<String> {
+    find_check(report, name)
+        .details
+        .as_ref()
+        .and_then(|d| d.get("error_shape"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+/// Mock any JSON-RPC call for `method` to fail with the given error code.
+/// Also answers the plain-GET connectivity probe so httpConnectivity
+/// passes and the report counts only the method failure.
+fn mock_json_rpc_error(server: &mut mockito::Server, method: &str, code: i32) {
+    server
+        .mock("GET", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("{}")
+        .create();
+    server
+        .mock("POST", "/")
+        .match_body(mockito::Matcher::Regex(format!(r#""method":"{method}""#)))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(json_body(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "error": { "code": code, "message": "mocked provider error" }
+        })))
+        .create();
+}
+
+/// Mock any JSON-RPC call to fail with the given HTTP status and body.
+/// Also answers the plain-GET connectivity probe so httpConnectivity
+/// passes and the report counts only the method failure.
+fn mock_http_error(server: &mut mockito::Server, status: usize, body: &str) {
+    server
+        .mock("GET", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("{}")
+        .create();
+    server
+        .mock("POST", "/")
+        .with_status(status)
+        .with_header("content-type", "text/html")
+        .with_body(body)
+        .create();
+}
+
+#[tokio::test]
+async fn test_error_shape_method_not_found() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+    mock_json_rpc_error(&mut server, "getNetwork", -32601);
+
+    let report =
+        DiagnosticReport::run_all(&url, Duration::from_secs(5), Some("getNetwork"), 1).await;
+
+    let check = find_check(&report, "getNetwork");
+    assert_eq!(check.status, CheckStatus::Fail);
+    assert_eq!(
+        error_shape_of(&report, "getNetwork").as_deref(),
+        Some("method_not_found")
+    );
+    // The coarse category is unchanged by the shape.
+    assert_eq!(
+        check.error,
+        Some(miyo_rpc::IssueCategory::UnsupportedMethod)
+    );
+    assert_eq!(report.summary.failed, 1);
+}
+
+#[tokio::test]
+async fn test_error_shape_invalid_params_and_internal_error() {
+    for (code, shape) in [(-32602, "invalid_params"), (-32603, "internal_error")] {
+        let mut server = mockito::Server::new_async().await;
+        let url = server.url();
+        mock_json_rpc_error(&mut server, "getNetwork", code);
+
+        let report =
+            DiagnosticReport::run_all(&url, Duration::from_secs(5), Some("getNetwork"), 1).await;
+
+        assert_eq!(
+            error_shape_of(&report, "getNetwork").as_deref(),
+            Some(shape),
+            "code {code} must map to {shape}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_error_shape_unknown_json_rpc_code() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+    mock_json_rpc_error(&mut server, "getNetwork", -32000);
+
+    let report =
+        DiagnosticReport::run_all(&url, Duration::from_secs(5), Some("getNetwork"), 1).await;
+
+    assert_eq!(
+        error_shape_of(&report, "getNetwork").as_deref(),
+        Some("json_rpc_error")
+    );
+}
+
+#[tokio::test]
+async fn test_error_shape_rate_limited_keeps_retry_after() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+    server
+        .mock("GET", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("{}")
+        .create();
+    server
+        .mock("POST", "/")
+        .with_status(429)
+        .with_header("content-type", "application/json")
+        .with_header("Retry-After", "120")
+        .with_body("{\"error\": \"slow down\"}")
+        .create();
+
+    let report =
+        DiagnosticReport::run_all(&url, Duration::from_secs(5), Some("getNetwork"), 1).await;
+
+    assert_eq!(
+        error_shape_of(&report, "getNetwork").as_deref(),
+        Some("rate_limited")
+    );
+    let details = find_check(&report, "getNetwork")
+        .details
+        .as_ref()
+        .expect("failure details");
+    assert_eq!(
+        details.get("retry_after"),
+        Some(&Value::String("120".to_string()))
+    );
+    assert_eq!(details.get("retry_after_secs"), Some(&Value::from(120u64)));
+}
+
+#[tokio::test]
+async fn test_error_shape_html_error_page() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+    mock_http_error(
+        &mut server,
+        503,
+        "<!DOCTYPE html><html><head><title>Error</title></head><body>blocked</body></html>",
+    );
+
+    let report =
+        DiagnosticReport::run_all(&url, Duration::from_secs(5), Some("getNetwork"), 1).await;
+
+    assert_eq!(
+        error_shape_of(&report, "getNetwork").as_deref(),
+        Some("html_error_page")
+    );
+}
+
+#[tokio::test]
+async fn test_error_shape_http_server_and_client_errors() {
+    for (status, shape) in [
+        (500, "http_server_error"),
+        (502, "http_server_error"),
+        (404, "http_client_error"),
+        (403, "http_client_error"),
+    ] {
+        let mut server = mockito::Server::new_async().await;
+        let url = server.url();
+        mock_http_error(&mut server, status, "{\"error\": \"provider failure\"}");
+
+        let report =
+            DiagnosticReport::run_all(&url, Duration::from_secs(5), Some("getNetwork"), 1).await;
+
+        assert_eq!(
+            error_shape_of(&report, "getNetwork").as_deref(),
+            Some(shape),
+            "HTTP {status} must map to {shape}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_error_shape_non_json_response() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+    server
+        .mock("GET", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("{}")
+        .create();
+    server
+        .mock("POST", "/")
+        .with_status(200)
+        .with_header("content-type", "text/plain")
+        .with_body("this is not json at all")
+        .create();
+
+    let report =
+        DiagnosticReport::run_all(&url, Duration::from_secs(5), Some("getNetwork"), 1).await;
+
+    assert_eq!(
+        error_shape_of(&report, "getNetwork").as_deref(),
+        Some("non_json_response")
+    );
+}
+
+#[tokio::test]
+async fn test_error_shape_malformed_response() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+    server
+        .mock("GET", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("{}")
+        .create();
+    server
+        .mock("POST", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(json_body(json!({"jsonrpc": "2.0", "id": 1})))
+        .create();
+
+    let report =
+        DiagnosticReport::run_all(&url, Duration::from_secs(5), Some("getNetwork"), 1).await;
+
+    assert_eq!(
+        error_shape_of(&report, "getNetwork").as_deref(),
+        Some("malformed_response")
+    );
+}
+
+#[tokio::test]
+async fn test_error_shape_oversized_response() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+    server
+        .mock("GET", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("{}")
+        .create();
+    // A valid getNetwork response well over the 100-byte cap below.
+    server
+        .mock("POST", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(json_body(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "friendbotUrl": "https://friendbot.stellar.org",
+                "passphrase": "Test SDF Network ; September 2015",
+                "protocolVersion": 23
+            }
+        })))
+        .create();
+
+    let config = RpcClientConfig::new(Duration::from_secs(5)).with_max_response_bytes(100);
+    let report = DiagnosticReport::run_all_with_config(&url, config, Some("getNetwork"), 1).await;
+
+    assert_eq!(
+        error_shape_of(&report, "getNetwork").as_deref(),
+        Some("oversized_response")
+    );
+}
+
+#[tokio::test]
+async fn test_error_shape_transport_error() {
+    let report = DiagnosticReport::run_all(
+        "http://127.0.0.1:1",
+        Duration::from_secs(5),
+        Some("getNetwork"),
+        1,
+    )
+    .await;
+
+    assert_eq!(
+        error_shape_of(&report, "getNetwork").as_deref(),
+        Some("transport_error")
+    );
+}
+
+#[tokio::test]
+async fn test_error_shape_configuration_error() {
+    let report =
+        DiagnosticReport::run_all("ftp://example.com/rpc", Duration::from_millis(100), None, 3)
+            .await;
+
+    assert_eq!(report.runs, 1);
+    // The 11 RPC method checks fail at client build with the InvalidUrl
+    // error; httpConnectivity does its own plain GET, which fails at
+    // transport level instead.
+    for check in &report.checks {
+        assert_eq!(check.status, CheckStatus::Fail);
+        let expected = if check.name == "httpConnectivity" {
+            "transport_error"
+        } else {
+            "configuration_error"
+        };
+        assert_eq!(
+            error_shape_of(&report, &check.name).as_deref(),
+            Some(expected),
+            "check {} must carry the {expected} shape",
+            check.name
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_error_shape_unsupported_method_simulation() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+
+    server
+        .mock("GET", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("{}")
+        .create();
+
+    mock_get_network_passphrase(&mut server, "Test SDF Network ; September 2015");
+    mock_simulate_transaction_result(
+        &mut server,
+        json!({"error": "simulation failed: host function not found"}),
+    );
+
+    let report =
+        DiagnosticReport::run_all(&url, Duration::from_secs(5), Some("simulateTransaction"), 1)
+            .await;
+
+    let check = find_check(&report, "simulateTransaction");
+    assert_eq!(check.status, CheckStatus::Fail);
+    assert_eq!(
+        error_shape_of(&report, "simulateTransaction").as_deref(),
+        Some("unsupported_method")
     );
 }

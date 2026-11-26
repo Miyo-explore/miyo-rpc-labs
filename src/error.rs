@@ -92,6 +92,80 @@ impl MiyoError {
     }
 }
 
+/// Fine-grained provider error shape for a failure, surfaced as
+/// `error_shape` in a failed check's `details`.
+///
+/// This is finer than the coarse [`IssueCategory`] bucket (which never
+/// changes): two failures in the same category can have different shapes
+/// — e.g. a 5xx carrying a Cloudflare HTML error page (`html_error_page`)
+/// versus a 5xx carrying a JSON body (`http_server_error`). The shape
+/// names *how* the provider failed, so a reader can tell providers apart
+/// without opening the raw response. It never changes the exit code.
+///
+/// The mapping is table-driven where the discriminator is a code
+/// ([`JSON_RPC_CODE_SHAPES`]); HTTP statuses are range-matched, and the
+/// body is inspected only for two shapes the client itself can observe:
+/// an HTML error page, and the client's own oversized-body message. No
+/// provider-specific string matching beyond that: the taxonomy classifies
+/// shapes, it does not fingerprint providers.
+pub fn classify_error_shape(err: &MiyoError) -> &'static str {
+    match err {
+        MiyoError::HttpError { status, body, .. } => {
+            if is_oversized_body(body) {
+                "oversized_response"
+            } else if *status == 429 {
+                "rate_limited"
+            } else if is_html_body(body) {
+                "html_error_page"
+            } else if *status >= 500 {
+                "http_server_error"
+            } else if *status >= 400 {
+                "http_client_error"
+            } else {
+                "http_error"
+            }
+        }
+        MiyoError::JsonRpcError { code, .. } => JSON_RPC_CODE_SHAPES
+            .iter()
+            .find(|(c, _)| *c == *code)
+            .map(|(_, shape)| *shape)
+            .unwrap_or("json_rpc_error"),
+        MiyoError::InvalidJson { .. } => "non_json_response",
+        MiyoError::MalformedStructure(_) => "malformed_response",
+        MiyoError::UnsupportedMethod(_, _) => "unsupported_method",
+        MiyoError::MissingField(_) => "missing_field",
+        MiyoError::Network(_) => "transport_error",
+        MiyoError::Timeout(_) => "timeout",
+        MiyoError::InvalidUrl(_) => "configuration_error",
+        MiyoError::Other(_) => "unknown_error",
+    }
+}
+
+/// JSON-RPC error codes with a dedicated shape. Any other code maps to
+/// `"json_rpc_error"`.
+const JSON_RPC_CODE_SHAPES: &[(i32, &str)] = &[
+    (-32601, "method_not_found"),
+    (-32602, "invalid_params"),
+    (-32603, "internal_error"),
+];
+
+/// Whether `body` is the client's own oversized-response message (see
+/// `RpcClient::call_raw`): the body is synthetic, not provider text, so
+/// matching its fixed prefix matches our own format, not a provider.
+fn is_oversized_body(body: &str) -> bool {
+    body.starts_with("response body exceeds maximum size")
+}
+
+/// Whether `body` looks like an HTML error page (Cloudflare-style):
+/// leading whitespace ignored, case-insensitive `<!doctype html` or
+/// `<html` opening tag.
+fn is_html_body(body: &str) -> bool {
+    let t = body.trim_start();
+    t.get(..14)
+        .is_some_and(|h| h.eq_ignore_ascii_case("<!doctype html"))
+        || t.get(..5).is_some_and(|h| h.eq_ignore_ascii_case("<html"))
+}
+
 /// Coarse-grained error category for reporting purposes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorCategory {
@@ -161,5 +235,142 @@ mod tests {
     #[test]
     fn test_3xx_stays_transport() {
         assert_eq!(http(302).category(), ErrorCategory::Transport);
+    }
+
+    fn http_body(status: u16, body: &str) -> MiyoError {
+        MiyoError::HttpError {
+            status,
+            body: body.to_string(),
+            retry_after: None,
+        }
+    }
+
+    fn rpc_error(code: i32) -> MiyoError {
+        MiyoError::JsonRpcError {
+            code,
+            message: "error".to_string(),
+            data: None,
+        }
+    }
+
+    #[test]
+    fn test_error_shape_json_rpc_codes_table() {
+        assert_eq!(classify_error_shape(&rpc_error(-32601)), "method_not_found");
+        assert_eq!(classify_error_shape(&rpc_error(-32602)), "invalid_params");
+        assert_eq!(classify_error_shape(&rpc_error(-32603)), "internal_error");
+        // Any other code falls back to the generic shape.
+        assert_eq!(classify_error_shape(&rpc_error(-32000)), "json_rpc_error");
+        assert_eq!(classify_error_shape(&rpc_error(0)), "json_rpc_error");
+    }
+
+    #[test]
+    fn test_error_shape_http_statuses() {
+        assert_eq!(
+            classify_error_shape(&http_body(429, "slow down")),
+            "rate_limited"
+        );
+        assert_eq!(
+            classify_error_shape(&http_body(500, "{\"error\":\"boom\"}")),
+            "http_server_error"
+        );
+        assert_eq!(
+            classify_error_shape(&http_body(503, "unavailable")),
+            "http_server_error"
+        );
+        assert_eq!(
+            classify_error_shape(&http_body(404, "not found")),
+            "http_client_error"
+        );
+        assert_eq!(
+            classify_error_shape(&http_body(403, "forbidden")),
+            "http_client_error"
+        );
+    }
+
+    #[test]
+    fn test_error_shape_html_error_page() {
+        assert_eq!(
+            classify_error_shape(&http_body(
+                503,
+                "<!DOCTYPE html><html><body>error</body></html>"
+            )),
+            "html_error_page"
+        );
+        assert_eq!(
+            classify_error_shape(&http_body(403, "  <html><head></head></html>")),
+            "html_error_page"
+        );
+        assert_eq!(
+            classify_error_shape(&http_body(502, "<!DoCtYpE HtMl>")),
+            "html_error_page"
+        );
+        // A JSON body on a 5xx is not an HTML page.
+        assert_eq!(
+            classify_error_shape(&http_body(500, "{\"code\": 500}")),
+            "http_server_error"
+        );
+    }
+
+    #[test]
+    fn test_error_shape_oversized_response() {
+        assert_eq!(
+            classify_error_shape(&http_body(
+                200,
+                "response body exceeds maximum size of 100 bytes (got 500)"
+            )),
+            "oversized_response"
+        );
+        // The oversize prefix wins over the status: the synthetic body
+        // is the signal, even on a 200.
+        assert_eq!(
+            classify_error_shape(&http_body(
+                500,
+                "response body exceeds maximum size of 100 bytes (got 500)"
+            )),
+            "oversized_response"
+        );
+    }
+
+    #[test]
+    fn test_error_shape_other_variants() {
+        assert_eq!(
+            classify_error_shape(&MiyoError::InvalidJson {
+                raw: "<10-byte body not shown>".to_string()
+            }),
+            "non_json_response"
+        );
+        assert_eq!(
+            classify_error_shape(&MiyoError::MalformedStructure(
+                "missing 'result'".to_string()
+            )),
+            "malformed_response"
+        );
+        assert_eq!(
+            classify_error_shape(&MiyoError::UnsupportedMethod(
+                "simulateTransaction".to_string(),
+                "simulation failed".to_string()
+            )),
+            "unsupported_method"
+        );
+        assert_eq!(
+            classify_error_shape(&MiyoError::MissingField("sequence".to_string())),
+            "missing_field"
+        );
+        assert_eq!(
+            classify_error_shape(&MiyoError::Network("connection failed".to_string())),
+            "transport_error"
+        );
+        assert_eq!(
+            classify_error_shape(&MiyoError::Timeout(std::time::Duration::from_secs(5))),
+            "timeout"
+        );
+        assert_eq!(
+            classify_error_shape(&MiyoError::InvalidUrl("bad scheme".to_string())),
+            "configuration_error"
+        );
+        assert_eq!(
+            classify_error_shape(&MiyoError::Other("something else".to_string())),
+            "unknown_error"
+        );
     }
 }
