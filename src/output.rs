@@ -289,7 +289,7 @@ pub fn format_human(report: &DiagnosticReport) -> String {
 /// Human-readable formatting of a diagnostic report with an explicit color
 /// switch.
 ///
-/// `color = true` emits ANSI escape codes for PASS/FAIL/SKIP;
+/// `color = true` emits ANSI escape codes for PASS/FAIL/WARN/SKIP;
 /// `color = false` renders the same report as plain text. Use this in tests
 /// or when the caller already decided about color (e.g. piped output).
 pub fn format_human_with_color(report: &DiagnosticReport, color: bool) -> String {
@@ -301,6 +301,7 @@ pub fn format_human_with_color(report: &DiagnosticReport, color: bool) -> String
         let status_str = match check.status {
             CheckStatus::Pass => colorize("PASS", "\x1b[32m", color),
             CheckStatus::Fail => colorize("FAIL", "\x1b[31m", color),
+            CheckStatus::Warn => colorize("WARN", "\x1b[35m", color),
             CheckStatus::Skip => colorize("SKIP", "\x1b[33m", color),
         };
 
@@ -335,8 +336,12 @@ pub fn format_human_with_color(report: &DiagnosticReport, color: bool) -> String
         out.push_str(&format!("Runs: {} total\n", report.runs));
     }
     out.push_str(&format!(
-        "Summary: {} passed, {} failed, {} skipped ({} ran)\n",
-        report.summary.passed, report.summary.failed, report.summary.skipped, report.summary.ran
+        "Summary: {} passed, {} failed, {} warned, {} skipped ({} ran)\n",
+        report.summary.passed,
+        report.summary.failed,
+        report.summary.warned,
+        report.summary.skipped,
+        report.summary.ran
     ));
 
     out
@@ -380,6 +385,7 @@ pub fn format_json(report: &DiagnosticReport) -> Result<String, serde_json::Erro
             status: match c.status {
                 crate::diagnostics::CheckStatus::Pass => "pass".to_string(),
                 crate::diagnostics::CheckStatus::Fail => "fail".to_string(),
+                crate::diagnostics::CheckStatus::Warn => "warn".to_string(),
                 crate::diagnostics::CheckStatus::Skip => "skip".to_string(),
             },
             timestamp: c.timestamp.clone(),
@@ -439,12 +445,14 @@ mod tests {
             checks: vec![
                 mk("getHealth", CheckStatus::Pass),
                 mk("getNetwork", CheckStatus::Fail),
-                mk("getLatestLedger", CheckStatus::Skip),
+                mk("getLatestLedger", CheckStatus::Warn),
+                mk("getVersionInfo", CheckStatus::Skip),
             ],
             summary: ReportSummary {
-                ran: 2,
+                ran: 3,
                 passed: 1,
                 failed: 1,
+                warned: 1,
                 skipped: 1,
                 total_runs: 1,
             },
@@ -456,7 +464,31 @@ mod tests {
         let out = format_human_with_color(&sample_report(), true);
         assert!(out.contains("\x1b[32mPASS\x1b[0m"), "PASS should be green");
         assert!(out.contains("\x1b[31mFAIL\x1b[0m"), "FAIL should be red");
+        assert!(
+            out.contains("\x1b[35mWARN\x1b[0m"),
+            "WARN should be magenta"
+        );
         assert!(out.contains("\x1b[33mSKIP\x1b[0m"), "SKIP should be yellow");
+        assert!(out.contains("1 warned"), "summary line must count warned");
+    }
+
+    #[test]
+    fn warn_status_renders_in_human_and_json() {
+        let out = format_human_with_color(&sample_report(), false);
+        assert!(out.contains("WARN"), "WARN text must render without color");
+        assert!(
+            out.contains("1 warned"),
+            "summary line must count warned: {out}"
+        );
+        let json = format_json(&sample_report()).expect("JSON serialization");
+        assert!(
+            json.contains("\"status\": \"warn\""),
+            "JSON status must be 'warn': {json}"
+        );
+        assert!(
+            json.contains("\"warned\": 1"),
+            "JSON summary must carry warned: {json}"
+        );
     }
 
     #[test]

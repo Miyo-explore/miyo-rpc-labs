@@ -1709,6 +1709,310 @@ async fn test_client_init_failure_reports_one_run() {
     assert!(!report.endpoint.contains("secret"));
 }
 
+// ────────────────────────────
+// Warn tier for ledger progression
+// ────────────────────────────
+
+/// Mock a `getLatestLedger` success with an explicit sequence (number
+/// form, as live endpoints return it) and ledger hash. Each mock answers
+/// exactly one call, so sequential mocks script advancing / changing
+/// ledgers across `--runs N`.
+fn mock_latest_ledger_seq_hash(server: &mut mockito::Server, sequence: u64, id: &str) {
+    server
+        .mock("POST", "/")
+        .match_body(mockito::Matcher::Regex(
+            r#""method":"getLatestLedger""#.to_string(),
+        ))
+        .expect(1)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(json_body(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "id": id,
+                "sequence": sequence,
+                "closeTime": "1765223032"
+            }
+        })))
+        .create();
+}
+
+/// A ledger that does not advance across `--runs 2` downgrades
+/// `getLatestLedger` from Pass to Warn — a frozen endpoint must not look
+/// healthy in CI — while the exit-code signal stays clean (failed == 0).
+#[tokio::test]
+async fn test_ledger_health_stagnant_warns() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+
+    server
+        .mock("GET", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("{}")
+        .create();
+
+    mock_latest_ledger(&mut server, json!(5841158));
+
+    let report =
+        DiagnosticReport::run_all(&url, Duration::from_secs(5), Some("getLatestLedger"), 2).await;
+
+    let check = find_check(&report, "getLatestLedger");
+    assert_eq!(check.status, CheckStatus::Warn);
+    let evidence = check.evidence.as_deref().unwrap_or("");
+    assert!(
+        evidence.contains("possibly stale"),
+        "evidence must name the staleness verdict: {evidence}"
+    );
+    assert_eq!(report.summary.warned, 1);
+    assert_eq!(report.summary.passed, 1); // httpConnectivity only
+    assert_eq!(report.summary.failed, 0);
+    assert_eq!(report.summary.skipped, 10);
+}
+
+/// A `getLatestLedger` result with hundred-kilobyte XDR blobs must still
+/// Warn on a stagnant ledger: the short fields (`sequence`, `id`) are
+/// kept in `details` even when the blobs are dropped, so the health
+/// analysis sees them. (Before the fix, the all-or-nothing size cap
+/// discarded the whole result, `details` had no `id`, and the analysis
+/// misread "no hashes" as an inconsistency — a false Warn on the live
+/// Testnet, whose ledger advances normally.)
+#[tokio::test]
+async fn test_ledger_health_large_result_still_warns() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+
+    server
+        .mock("GET", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("{}")
+        .create();
+
+    server
+        .mock("POST", "/")
+        .match_body(mockito::Matcher::Regex(
+            r#""method":"getLatestLedger""#.to_string(),
+        ))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(json_body(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "id": "9f3308826b666c11df41693b17eddbb68aea9758be0f67fd5df81f6cf5c48984",
+                "sequence": 5841158,
+                "closeTime": "1765223032",
+                "headerXdr": "A".repeat(3000),
+                "metadataXdr": "B".repeat(3000)
+            }
+        })))
+        .create();
+
+    let report =
+        DiagnosticReport::run_all(&url, Duration::from_secs(5), Some("getLatestLedger"), 2).await;
+
+    let check = find_check(&report, "getLatestLedger");
+    assert_eq!(check.status, CheckStatus::Warn);
+    let details = check.details.as_ref().expect("getLatestLedger details");
+    assert!(
+        details.get("id").is_some(),
+        "short fields must survive a large result: {details:?}"
+    );
+    assert_eq!(
+        details.get("sequence"),
+        Some(&Value::from(5841158u64)),
+        "sequence must survive a large result"
+    );
+    assert!(
+        details.get("headerXdr").is_none(),
+        "XDR blobs must still be dropped from details"
+    );
+    let evidence = check.evidence.as_deref().unwrap_or("");
+    assert!(
+        evidence.contains("possibly stale"),
+        "same seq + same hash must be stale, not inconsistent: {evidence}"
+    );
+    assert_eq!(report.summary.warned, 1);
+    assert_eq!(report.summary.failed, 0);
+}
+
+/// Same sequence with a changing hash across runs is a ledger
+/// inconsistency, which also Warns.
+#[tokio::test]
+async fn test_ledger_health_inconsistent_warns() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+
+    server
+        .mock("GET", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("{}")
+        .create();
+
+    mock_latest_ledger_seq_hash(&mut server, 5841158, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    mock_latest_ledger_seq_hash(&mut server, 5841158, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+
+    let report =
+        DiagnosticReport::run_all(&url, Duration::from_secs(5), Some("getLatestLedger"), 2).await;
+
+    let check = find_check(&report, "getLatestLedger");
+    assert_eq!(check.status, CheckStatus::Warn);
+    let evidence = check.evidence.as_deref().unwrap_or("");
+    assert!(
+        evidence.contains("inconsistency"),
+        "evidence must name the inconsistency verdict: {evidence}"
+    );
+    assert_eq!(report.summary.warned, 1);
+    assert_eq!(report.summary.failed, 0);
+}
+
+/// An advancing ledger stays Pass across runs — no false Warn.
+#[tokio::test]
+async fn test_ledger_health_advancing_stays_pass() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+
+    server
+        .mock("GET", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("{}")
+        .create();
+
+    mock_latest_ledger_seq_hash(&mut server, 5841158, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    mock_latest_ledger_seq_hash(&mut server, 5841159, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+
+    let report =
+        DiagnosticReport::run_all(&url, Duration::from_secs(5), Some("getLatestLedger"), 2).await;
+
+    let check = find_check(&report, "getLatestLedger");
+    assert_eq!(check.status, CheckStatus::Pass);
+    let evidence = check.evidence.as_deref().unwrap_or("");
+    assert!(
+        evidence.contains("advanced"),
+        "evidence must name the healthy verdict: {evidence}"
+    );
+    assert_eq!(report.summary.warned, 0);
+    assert_eq!(report.summary.passed, 2);
+}
+
+/// A single run stays inconclusive: no false Warn from one sample.
+#[tokio::test]
+async fn test_ledger_health_single_run_stays_pass() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+
+    server
+        .mock("GET", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("{}")
+        .create();
+
+    mock_latest_ledger(&mut server, json!(5841158));
+
+    let report =
+        DiagnosticReport::run_all(&url, Duration::from_secs(5), Some("getLatestLedger"), 1).await;
+
+    let check = find_check(&report, "getLatestLedger");
+    assert_eq!(check.status, CheckStatus::Pass);
+    let evidence = check.evidence.as_deref().unwrap_or("");
+    assert!(
+        evidence.contains("inconclusive"),
+        "single run must stay inconclusive: {evidence}"
+    );
+    assert_eq!(report.summary.warned, 0);
+}
+
+/// Warn is visible in the machine-readable report: status `"warn"` and
+/// a `warned` summary count (additive — `schema_version` stays `"1.0"`).
+#[tokio::test]
+async fn test_warn_in_json_output() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+
+    server
+        .mock("GET", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("{}")
+        .create();
+
+    mock_latest_ledger(&mut server, json!(5841158));
+
+    let report =
+        DiagnosticReport::run_all(&url, Duration::from_secs(5), Some("getLatestLedger"), 2).await;
+
+    let json_output = miyo_rpc::format_json(&report).expect("JSON serialization");
+    let parsed: serde_json::Value = serde_json::from_str(&json_output).expect("valid JSON");
+    assert_eq!(
+        parsed.get("schema_version").and_then(|v| v.as_str()),
+        Some("1.0"),
+        "Warn is additive: schema_version must not bump"
+    );
+    let check = parsed
+        .get("checks")
+        .and_then(|v| v.as_array())
+        .and_then(|cs| {
+            cs.iter()
+                .find(|c| c.get("name").and_then(|n| n.as_str()) == Some("getLatestLedger"))
+        })
+        .expect("getLatestLedger present in JSON");
+    assert_eq!(check.get("status").and_then(|v| v.as_str()), Some("warn"));
+    assert_eq!(
+        parsed
+            .get("summary")
+            .and_then(|v| v.get("warned"))
+            .and_then(|v| v.as_u64()),
+        Some(1)
+    );
+    assert_eq!(
+        parsed
+            .get("summary")
+            .and_then(|v| v.get("failed"))
+            .and_then(|v| v.as_u64()),
+        Some(0)
+    );
+}
+
+/// Warn is visible in the human report: a magenta WARN label and a
+/// `warned` count in the summary line.
+#[tokio::test]
+async fn test_warn_in_human_output() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+
+    server
+        .mock("GET", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("{}")
+        .create();
+
+    mock_latest_ledger(&mut server, json!(5841158));
+
+    let report =
+        DiagnosticReport::run_all(&url, Duration::from_secs(5), Some("getLatestLedger"), 2).await;
+
+    let out = miyo_rpc::format_human_with_color(&report, true);
+    assert!(
+        out.contains("\x1b[35mWARN\x1b[0m"),
+        "WARN must render magenta: {out}"
+    );
+    assert!(
+        out.contains("1 warned"),
+        "summary line must count warned: {out}"
+    );
+    let plain = miyo_rpc::format_human_with_color(&report, false);
+    assert!(
+        plain.contains("WARN"),
+        "WARN text must render without color"
+    );
+}
+
 /// Helper: build a minimal report whose single check is `getNetwork`.
 fn build_network_report(
     passphrase: Option<&str>,
@@ -1738,6 +2042,7 @@ fn build_network_report(
             ran: 1,
             passed: 1,
             failed: 0,
+            warned: 0,
             skipped: 0,
             total_runs: 1,
         },
@@ -1803,6 +2108,7 @@ fn test_enforce_expected_network_no_getnetwork_check() {
             ran: 1,
             passed: 1,
             failed: 0,
+            warned: 0,
             skipped: 0,
             total_runs: 1,
         },
@@ -1864,6 +2170,7 @@ fn build_report(passport: &str, seq: &str, hash: &str) -> miyo_rpc::DiagnosticRe
             ran: 2,
             passed: 2,
             failed: 0,
+            warned: 0,
             skipped: 0,
             total_runs: 1,
         },
@@ -1915,6 +2222,7 @@ fn test_json_schema_version_and_field_types() {
             ran: 3,
             passed: 1,
             failed: 0,
+            warned: 0,
             skipped: 0,
             total_runs: 3,
         },

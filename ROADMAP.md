@@ -176,8 +176,9 @@ limitations are tracked in the README "Limitations" section:
 - **Scope:** `analyze_ledger_health` collects `sequence` + `id` (ledger hash)
   per run and appends a freshness verdict (`healthy` / `possibly-stale` /
   `inconsistent`) to the check's `evidence`. Non-monotonic or stagnant state
-  is surfaced as evidence, not a `Fail` — `Warn` tier is deferred (see Risks),
-  and a single run is reported as inconclusive rather than mis-flagged.
+  downgrades `getLatestLedger` from `Pass` to `Warn` (never a `Fail`, never
+  an exit-code change), and a single run is reported as inconclusive rather
+  than mis-flagged.
 - **Dependencies:** Milestone 1.
 - **Priority:** P2 — valuable but expands the status model.
 - **Validation:** 5 unit tests in `src/diagnostics.rs` (advancing / stagnant /
@@ -251,7 +252,7 @@ limitations are tracked in the README "Limitations" section:
 | Hardcoding passphrases couples us to Stellar network constants | Low | Accept — passphrases are public, stable, and rarely rotate. Re-evaluate if a network upgrade changes them. |
 | Unknown network names could silently no-op | Medium | Reject unknown names with exit code `2` rather than ignoring. |
 | Adding new fields mid-trajectory may break consumers | Medium | Gate behind `schema_version` (Milestone 2) after this milestone. |
-| Ledger progression needs a `Warn` tier beyond Pass/Fail/Skip | Medium | Defer to Milestone 3; Milestone 1 stays within existing status model. |
+| Ledger progression needs a `Warn` tier beyond Pass/Fail/Skip | Medium | Implemented in v0.4.0 (unreleased): `Warn` with precedence Fail > Warn > Skip > Pass; `getLatestLedger` downgrades on stagnant/inconsistent ledgers across `--runs N`; exit codes unchanged. |
 
 ## 8. Immediate Next Steps
 
