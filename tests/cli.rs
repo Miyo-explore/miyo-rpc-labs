@@ -824,3 +824,55 @@ fn test_check_valid_contract_not_rejected_with_code_2() {
         "valid --contract must not exit with code 2"
     );
 }
+
+#[test]
+fn test_check_min_retention_accepted() {
+    // --min-retention is a plain u64 flag: a valid value must be
+    // accepted (the loopback URL fails the run with code 1, never 2),
+    // while a non-numeric value is a clap usage error (exit code 2).
+    let output = Command::new(BIN)
+        .args([
+            "check",
+            "--url",
+            "http://127.0.0.1:1",
+            "--min-retention",
+            "100",
+        ])
+        .output()
+        .expect("failed to execute miyo-rpc check");
+    assert_ne!(
+        output.status.code(),
+        Some(2),
+        "valid --min-retention must not exit with code 2"
+    );
+
+    let output = Command::new(BIN)
+        .args([
+            "check",
+            "--url",
+            "http://127.0.0.1:1",
+            "--min-retention",
+            "not-a-number",
+        ])
+        .output()
+        .expect("failed to execute miyo-rpc check");
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "non-numeric --min-retention should exit with code 2"
+    );
+}
+
+#[test]
+fn test_check_help_lists_min_retention() {
+    let output = Command::new(BIN)
+        .args(["check", "--help"])
+        .output()
+        .expect("failed to run check --help");
+    assert!(output.status.success(), "check --help should succeed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("--min-retention"),
+        "check --help should list --min-retention, got: {stdout}"
+    );
+}

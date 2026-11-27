@@ -155,9 +155,9 @@ fn run_check(args: CheckArgs) -> ExitCode {
                 "warning: --compare has no effect on a single arbitrary-method probe; not applied."
             );
         }
-        if args.contract.is_some() || args.ttl_threshold.is_some() {
+        if args.contract.is_some() || args.ttl_threshold.is_some() || args.min_retention.is_some() {
             eprintln!(
-                "warning: --contract/--ttl-threshold have no effect on a single arbitrary-method probe; not applied."
+                "warning: --contract/--ttl-threshold/--min-retention have no effect on a single arbitrary-method probe; not applied."
             );
         }
     } else if params_given {
@@ -215,6 +215,7 @@ fn run_check(args: CheckArgs) -> ExitCode {
                 args.method.as_deref(),
                 runs,
                 ttl,
+                args.min_retention,
             )
             .await
         });
@@ -228,6 +229,7 @@ fn run_check(args: CheckArgs) -> ExitCode {
                     None,
                     runs,
                     ttl,
+                    args.min_retention,
                 )
                 .await
             });

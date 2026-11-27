@@ -105,7 +105,7 @@ pub struct CheckArgs {
 
     /// Contract ID (strkey `C...`) whose instance and code TTL to check.
     /// The `contractTtl` check only runs when this is given; without it
-    /// the check is absent from the report (default runs keep 12 checks).
+    /// the check is absent from the report (default runs keep 13 checks).
     #[arg(long, value_name = "CONTRACT")]
     pub contract: Option<String>,
 
@@ -114,6 +114,13 @@ pub struct CheckArgs {
     /// Only applies when `--contract` is given.
     #[arg(long, value_name = "N")]
     pub ttl_threshold: Option<u64>,
+
+    /// Minimum-retention threshold in ledgers for the `retentionWindow`
+    /// check (default: 17280 ≈ 1 day). Retained ledgers at or below
+    /// this threshold report `Warn` (inclusive). Applies to every run:
+    /// unlike `contractTtl`, `retentionWindow` needs no `--contract`.
+    #[arg(long, value_name = "N")]
+    pub min_retention: Option<u64>,
 }
 
 /// Arguments for the `batch` subcommand (multiple endpoints from a file).

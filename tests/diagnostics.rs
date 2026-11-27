@@ -453,7 +453,9 @@ async fn test_report_all_success() {
         .create();
 
     // Mock getLedgers. The check first resolves startLedger via
-    // getLatestLedger (reusing the mock above).
+    // getLatestLedger (reusing the mock above). The window is wide
+    // enough (17,985 ledgers retained) that `retentionWindow` passes
+    // against the default 17,280 threshold, like a healthy endpoint.
     server
         .mock("POST", "/")
         .match_body(mockito::Matcher::Regex(
@@ -469,7 +471,7 @@ async fn test_report_all_success() {
                     {"hash": "9f3308826b666c11df41693b17eddbb68aea9758be0f67fd5df81f6cf5c48984", "sequence": 2002985, "ledgerCloseTime": "1765223032"}
                 ],
                 "latestLedger": 2002985,
-                "oldestLedger": 2002900,
+                "oldestLedger": 1985000,
                 "cursor": "2002985"
             }
         })))
@@ -593,15 +595,15 @@ async fn test_report_all_success() {
 
     let report = DiagnosticReport::run_all(&url, Duration::from_secs(5), None, 1).await;
 
-    // Should have httpConnectivity + 11 method checks = 12 total
-    assert_eq!(report.checks.len(), 12);
+    // Should have httpConnectivity + 12 method checks = 13 total
+    assert_eq!(report.checks.len(), 13);
 
     // HTTP connectivity should pass (200)
     let http_check = report.checks.iter().find(|c| c.name == "httpConnectivity");
     assert!(http_check.is_some());
     assert_eq!(http_check.unwrap().status, CheckStatus::Pass);
 
-    // All 11 RPC method checks should pass
+    // All 12 RPC method checks should pass
     for name in [
         "getHealth",
         "getNetwork",
@@ -610,6 +612,7 @@ async fn test_report_all_success() {
         "getEvents",
         "getLedgerEntries",
         "getLedgers",
+        "retentionWindow",
         "getTransactions",
         "getFeeStats",
         "getTransaction",
@@ -715,6 +718,23 @@ async fn test_report_all_success() {
     assert_eq!(details.get("has_result_xdr"), Some(&Value::Bool(true)));
     assert_eq!(details.get("has_result_meta_xdr"), Some(&Value::Bool(true)));
 
+    // retentionWindow derived the retained window from the same
+    // getLedgers page: 17,985 ledgers (~1.04 days), above threshold.
+    let retention_check = find_check(&report, "retentionWindow");
+    let details = retention_check
+        .details
+        .as_ref()
+        .expect("retentionWindow should carry details");
+    assert_eq!(
+        details.get("retained_ledgers"),
+        Some(&Value::from(17_985u64))
+    );
+    assert_eq!(
+        details.get("retained_days_approx"),
+        Some(&Value::from(1.04f64))
+    );
+    assert_eq!(details.get("min_retention"), Some(&Value::from(17_280u64)));
+
     // simulateTransaction replayed the Testnet probe envelope and
     // reported the simulation result.
     let simulate_check = find_check(&report, "simulateTransaction");
@@ -734,7 +754,7 @@ async fn test_report_all_success() {
     );
     assert_eq!(details.get("cost_mem_bytes"), Some(&Value::from(51240u64)));
 
-    assert_eq!(report.summary.passed, 12);
+    assert_eq!(report.summary.passed, 13);
     assert_eq!(report.summary.failed, 0);
 }
 
@@ -764,21 +784,21 @@ async fn test_report_all_json_rpc_errors() {
 
     let report = DiagnosticReport::run_all(&url, Duration::from_secs(5), None, 1).await;
 
-    // 11 RPC method checks should all be Fail (getEvents, getLedgers,
-    // getTransactions, getTransaction, and simulateTransaction fail too:
-    // their internal getLatestLedger / getNetwork calls hit the same
-    // -32601 mock).
+    // 12 RPC method checks should all be Fail (getEvents, getLedgers,
+    // retentionWindow, getTransactions, getTransaction, and
+    // simulateTransaction fail too: their internal getLatestLedger /
+    // getNetwork calls hit the same -32601 mock).
     let rpc_checks: Vec<_> = report
         .checks
         .iter()
         .filter(|c| c.name != "httpConnectivity")
         .collect();
-    assert_eq!(rpc_checks.len(), 11);
+    assert_eq!(rpc_checks.len(), 12);
     for c in &rpc_checks {
         assert_eq!(c.status, CheckStatus::Fail, "{} should fail", c.name);
     }
 
-    assert_eq!(report.summary.failed, 12);
+    assert_eq!(report.summary.failed, 13);
 }
 
 /// Test method filter (--method).
@@ -1768,7 +1788,7 @@ async fn test_ledger_health_stagnant_warns() {
     assert_eq!(report.summary.warned, 1);
     assert_eq!(report.summary.passed, 1); // httpConnectivity only
     assert_eq!(report.summary.failed, 0);
-    assert_eq!(report.summary.skipped, 10);
+    assert_eq!(report.summary.skipped, 11);
 }
 
 /// A `getLatestLedger` result with hundred-kilobyte XDR blobs must still
@@ -3405,7 +3425,7 @@ fn test_is_builtin_method_public() {
     assert!(miyo_rpc::is_builtin_method("simulateTransaction"));
     assert!(miyo_rpc::is_builtin_method("contractTtl"));
     assert!(!miyo_rpc::is_builtin_method("sendTransaction"));
-    assert_eq!(miyo_rpc::BUILTIN_METHODS.len(), 12);
+    assert_eq!(miyo_rpc::BUILTIN_METHODS.len(), 13);
 }
 
 #[test]
@@ -3515,7 +3535,7 @@ async fn test_get_events_request_params_from_latest_ledger() {
     assert_eq!(details.get("has_cursor"), Some(&Value::Bool(true)));
     // The filter leaves the other built-ins skipped, not omitted.
     assert_eq!(report.summary.passed, 2); // httpConnectivity + getEvents
-    assert_eq!(report.summary.skipped, 10);
+    assert_eq!(report.summary.skipped, 11);
 }
 
 /// An empty page is still a Pass: the method works, the latest ledger
@@ -3741,7 +3761,7 @@ async fn test_get_ledger_entries_request_params_probe_key() {
     assert_eq!(details.get("latest_ledger"), Some(&Value::from(5841158u64)));
     // The filter leaves the other built-ins skipped, not omitted.
     assert_eq!(report.summary.passed, 2); // httpConnectivity + getLedgerEntries
-    assert_eq!(report.summary.skipped, 10);
+    assert_eq!(report.summary.skipped, 11);
 }
 
 /// An empty `entries` array is still a Pass: the method works, the probe
@@ -3925,7 +3945,7 @@ async fn test_get_ledgers_request_params_from_latest_ledger() {
     assert_eq!(details.get("has_cursor"), Some(&Value::Bool(true)));
     // The filter leaves the other built-ins skipped, not omitted.
     assert_eq!(report.summary.passed, 2); // httpConnectivity + getLedgers
-    assert_eq!(report.summary.skipped, 10);
+    assert_eq!(report.summary.skipped, 11);
 }
 
 /// An empty page is still a Pass: the method works, the window simply
@@ -4161,7 +4181,7 @@ async fn test_get_transactions_request_params_from_latest_ledger() {
     assert_eq!(details.get("has_cursor"), Some(&Value::Bool(true)));
     // The filter leaves the other built-ins skipped, not omitted.
     assert_eq!(report.summary.passed, 2); // httpConnectivity + getTransactions
-    assert_eq!(report.summary.skipped, 10);
+    assert_eq!(report.summary.skipped, 11);
 }
 
 /// An empty page is still a Pass: the method works, the latest ledger
@@ -4362,8 +4382,8 @@ async fn test_compare_covers_get_transactions() {
             "getTransactions must run and pass on the compare endpoint too"
         );
     }
-    assert_eq!(primary.checks.len(), 12);
-    assert_eq!(other.checks.len(), 12);
+    assert_eq!(primary.checks.len(), 13);
+    assert_eq!(other.checks.len(), 13);
 
     // Comparing two identical reports must keep getTransactions present
     // and passing, with no divergence flagged on it.
@@ -4460,7 +4480,7 @@ async fn test_get_fee_stats_success() {
     assert_eq!(details.get("latest_ledger"), Some(&Value::from(5933141u64)));
     // The filter leaves the other built-ins skipped, not omitted.
     assert_eq!(report.summary.passed, 2); // httpConnectivity + getFeeStats
-    assert_eq!(report.summary.skipped, 10);
+    assert_eq!(report.summary.skipped, 11);
 }
 
 /// A `getFeeStats` result without either fee object is malformed, not a
@@ -4564,8 +4584,8 @@ async fn test_compare_covers_get_fee_stats() {
             "getFeeStats must run and pass on the compare endpoint too"
         );
     }
-    assert_eq!(primary.checks.len(), 12);
-    assert_eq!(other.checks.len(), 12);
+    assert_eq!(primary.checks.len(), 13);
+    assert_eq!(other.checks.len(), 13);
 
     primary.compare_with(&other);
     let check = find_check(&primary, "getFeeStats");
@@ -4694,7 +4714,7 @@ async fn test_get_transaction_request_params_from_latest_ledger() {
     assert_eq!(details.get("has_result_meta_xdr"), Some(&Value::Bool(true)));
     // The filter leaves the other built-ins skipped, not omitted.
     assert_eq!(report.summary.passed, 2); // httpConnectivity + getTransaction
-    assert_eq!(report.summary.skipped, 10);
+    assert_eq!(report.summary.skipped, 11);
 }
 
 /// An empty page is a Skip, not a Fail: there is no transaction to fetch,
@@ -4732,7 +4752,7 @@ async fn test_get_transaction_empty_page_skips() {
         "skip evidence must say why there is nothing to fetch: {evidence}"
     );
     assert_eq!(report.summary.passed, 1); // httpConnectivity only
-    assert_eq!(report.summary.skipped, 11);
+    assert_eq!(report.summary.skipped, 12);
 }
 
 /// Older RPC versions return the page hash as `hash` instead of
@@ -5020,8 +5040,8 @@ async fn test_compare_covers_get_transaction() {
             "getTransaction must run and pass on the compare endpoint too"
         );
     }
-    assert_eq!(primary.checks.len(), 12);
-    assert_eq!(other.checks.len(), 12);
+    assert_eq!(primary.checks.len(), 13);
+    assert_eq!(other.checks.len(), 13);
 
     // Comparing two identical reports must keep getTransaction present
     // and passing, with no divergence flagged on it.
@@ -5151,7 +5171,7 @@ async fn test_simulate_transaction_success_testnet() {
     assert_eq!(details.get("cost_mem_bytes"), Some(&Value::from(51240u64)));
     // The filter leaves the other built-ins skipped, not omitted.
     assert_eq!(report.summary.passed, 2); // httpConnectivity + simulateTransaction
-    assert_eq!(report.summary.skipped, 10);
+    assert_eq!(report.summary.skipped, 11);
 }
 
 /// The probe transaction only exists on Testnet: on Mainnet the check
@@ -5190,7 +5210,7 @@ async fn test_simulate_transaction_skips_on_mainnet() {
         "skip evidence must say the probe is Testnet-specific: {evidence}"
     );
     assert_eq!(report.summary.passed, 1); // httpConnectivity only
-    assert_eq!(report.summary.skipped, 11);
+    assert_eq!(report.summary.skipped, 12);
 }
 
 /// Same Skip as Mainnet, for Futurenet.
@@ -5417,8 +5437,8 @@ async fn test_compare_covers_simulate_transaction() {
             "simulateTransaction must run and pass on the compare endpoint too"
         );
     }
-    assert_eq!(primary.checks.len(), 12);
-    assert_eq!(other.checks.len(), 12);
+    assert_eq!(primary.checks.len(), 13);
+    assert_eq!(other.checks.len(), 13);
 
     // Comparing two identical reports must keep simulateTransaction
     // present and passing, with no divergence flagged on it.
@@ -6134,6 +6154,7 @@ async fn run_contract_ttl(url: &str, contract: &str, threshold: u64) -> Diagnost
             contract_id,
             threshold,
         }),
+        None,
     )
     .await
 }
@@ -6197,7 +6218,7 @@ async fn test_contract_ttl_pass_wasm() {
     assert_eq!(details.get("ttl_threshold"), Some(&Value::from(17_280u64)));
     assert_eq!(report.summary.passed, 2); // httpConnectivity + contractTtl
     assert_eq!(report.summary.warned, 0);
-    assert_eq!(report.summary.skipped, 11);
+    assert_eq!(report.summary.skipped, 12);
 
     // The exact-body matchers prove both keys were sent as specified.
     instance_mock.assert_async().await;
@@ -6427,6 +6448,7 @@ async fn test_contract_ttl_skip_without_contract() {
         Some("contractTtl"),
         1,
         None,
+        None,
     )
     .await;
 
@@ -6441,10 +6463,10 @@ async fn test_contract_ttl_skip_without_contract() {
         "skip evidence must name the --contract flag"
     );
     assert_eq!(report.summary.passed, 1); // httpConnectivity only
-    assert_eq!(report.summary.skipped, 12);
+    assert_eq!(report.summary.skipped, 13);
 }
 
-/// Default runs (no `--contract`) keep exactly the 12 checks they had
+/// Default runs (no `--contract`) keep exactly the 13 checks they had
 /// before the TTL check existed.
 #[tokio::test]
 async fn test_contract_ttl_absent_from_default_run() {
@@ -6460,9 +6482,264 @@ async fn test_contract_ttl_absent_from_default_run() {
 
     let report = DiagnosticReport::run_all(&url, Duration::from_secs(5), None, 1).await;
 
-    assert_eq!(report.checks.len(), 12);
+    assert_eq!(report.checks.len(), 13);
     assert!(
         report.checks.iter().all(|c| c.name != "contractTtl"),
         "default run must not include contractTtl"
     );
+}
+
+/// Latest ledger used by the `retentionWindow` tests; chosen so the
+/// retained counts below are exact.
+const RETENTION_LATEST: u64 = 1_000_000;
+
+/// Mock `getLatestLedger` (sequence) and one page of `getLedgers` with
+/// the given `latestLedger` / `oldestLedger` window. `oldest` of `None`
+/// omits `oldestLedger` from the response (the Skip case).
+fn mock_retention_ledgers(server: &mut mockito::Server, latest: u64, oldest: Option<u64>) {
+    mock_latest_ledger(server, json!(latest));
+
+    let mut result = json!({
+        "ledgers": [
+            {"hash": "9f3308826b666c11df41693b17eddbb68aea9758be0f67fd5df81f6cf5c48984", "sequence": latest, "ledgerCloseTime": "1765223032"}
+        ],
+        "latestLedger": latest,
+        "latestLedgerCloseTime": 1765223032,
+        "cursor": ""
+    });
+    if let Some(oldest) = oldest {
+        result["oldestLedger"] = json!(oldest);
+        result["oldestLedgerCloseTime"] = json!(1765223032);
+    }
+
+    server
+        .mock("POST", "/")
+        .match_body(mockito::Matcher::Json(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getLedgers",
+            "params": {"startLedger": latest, "pagination": {"limit": 2}}
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(json_body(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": result
+        })))
+        .create();
+}
+
+/// Run only the `retentionWindow` check against the mock server, with
+/// the given threshold.
+async fn run_retention_window(url: &str, threshold: u64) -> DiagnosticReport {
+    DiagnosticReport::run_all_with_config_and_contract(
+        url,
+        RpcClientConfig::new(Duration::from_secs(5)),
+        Some("retentionWindow"),
+        1,
+        None,
+        Some(threshold),
+    )
+    .await
+}
+
+/// Retained ledgers above the threshold pass: 20,000 retained (> 17,280).
+#[tokio::test]
+async fn test_retention_window_pass() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+
+    server
+        .mock("GET", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("{}")
+        .create();
+
+    mock_retention_ledgers(&mut server, RETENTION_LATEST, Some(980_000));
+
+    let report = run_retention_window(&url, 17_280).await;
+
+    let check = find_check(&report, "retentionWindow");
+    assert_eq!(check.status, CheckStatus::Pass);
+    let details = check.details.as_ref().expect("retentionWindow details");
+    assert_eq!(
+        details.get("latest_ledger"),
+        Some(&Value::from(RETENTION_LATEST))
+    );
+    assert_eq!(details.get("oldest_ledger"), Some(&Value::from(980_000u64)));
+    assert_eq!(
+        details.get("retained_ledgers"),
+        Some(&Value::from(20_000u64))
+    );
+    assert_eq!(
+        details.get("retained_days_approx"),
+        Some(&Value::from(1.16f64))
+    );
+    assert_eq!(details.get("min_retention"), Some(&Value::from(17_280u64)));
+    assert_eq!(report.summary.passed, 2); // httpConnectivity + retentionWindow
+    assert_eq!(report.summary.skipped, 11);
+}
+
+/// Retained ledgers below the threshold warn.
+#[tokio::test]
+async fn test_retention_window_warn_below_threshold() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+
+    server
+        .mock("GET", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("{}")
+        .create();
+
+    mock_retention_ledgers(&mut server, RETENTION_LATEST, Some(990_000));
+
+    let report = run_retention_window(&url, 17_280).await;
+
+    let check = find_check(&report, "retentionWindow");
+    assert_eq!(check.status, CheckStatus::Warn);
+    let details = check.details.as_ref().expect("retentionWindow details");
+    assert_eq!(
+        details.get("retained_ledgers"),
+        Some(&Value::from(10_000u64))
+    );
+    assert_eq!(
+        details.get("retained_days_approx"),
+        Some(&Value::from(0.58f64))
+    );
+    // Warn counts in `ran`, not in `passed`; the exit code is unchanged.
+    assert_eq!(report.summary.warned, 1);
+    assert_eq!(report.summary.passed, 1); // httpConnectivity only
+}
+
+/// The threshold boundary is inclusive: retained == threshold warns.
+#[tokio::test]
+async fn test_retention_window_warn_at_threshold() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+
+    server
+        .mock("GET", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("{}")
+        .create();
+
+    mock_retention_ledgers(&mut server, RETENTION_LATEST, Some(982_720));
+
+    let report = run_retention_window(&url, 17_280).await;
+
+    let check = find_check(&report, "retentionWindow");
+    assert_eq!(check.status, CheckStatus::Warn);
+    let details = check.details.as_ref().expect("retentionWindow details");
+    assert_eq!(
+        details.get("retained_ledgers"),
+        Some(&Value::from(17_280u64))
+    );
+}
+
+/// A response with no `oldestLedger` cannot be judged: Skip, not Fail.
+#[tokio::test]
+async fn test_retention_window_skip_without_oldest_ledger() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+
+    server
+        .mock("GET", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("{}")
+        .create();
+
+    mock_retention_ledgers(&mut server, RETENTION_LATEST, None);
+
+    let report = run_retention_window(&url, 17_280).await;
+
+    let check = find_check(&report, "retentionWindow");
+    assert_eq!(check.status, CheckStatus::Skip);
+    assert!(
+        check
+            .evidence
+            .as_deref()
+            .unwrap_or("")
+            .contains("oldestLedger"),
+        "skip evidence must name the missing field"
+    );
+}
+
+/// A JSON-RPC error from `getLedgers` is a Fail with an error shape.
+#[tokio::test]
+async fn test_retention_window_fails_on_rpc_error() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+
+    server
+        .mock("GET", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("{}")
+        .create();
+
+    mock_latest_ledger(&mut server, json!(RETENTION_LATEST));
+    mock_json_rpc_error(&mut server, "getLedgers", -32602);
+
+    let report = run_retention_window(&url, 17_280).await;
+
+    let check = find_check(&report, "retentionWindow");
+    assert_eq!(check.status, CheckStatus::Fail);
+    assert_eq!(
+        error_shape_of(&report, "retentionWindow").as_deref(),
+        Some("invalid_params")
+    );
+}
+
+/// The default threshold (17280) applies when no override is given:
+/// 10,000 retained warns with the default too.
+#[tokio::test]
+async fn test_retention_window_default_threshold() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+
+    server
+        .mock("GET", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("{}")
+        .create();
+
+    mock_retention_ledgers(&mut server, RETENTION_LATEST, Some(990_000));
+
+    let report =
+        DiagnosticReport::run_all(&url, Duration::from_secs(5), Some("retentionWindow"), 1).await;
+
+    let check = find_check(&report, "retentionWindow");
+    assert_eq!(check.status, CheckStatus::Warn);
+    let details = check.details.as_ref().expect("retentionWindow details");
+    assert_eq!(details.get("min_retention"), Some(&Value::from(17_280u64)));
+}
+
+/// Default runs include `retentionWindow` (13 checks total) and it
+/// passes on a well-retained endpoint.
+#[tokio::test]
+async fn test_retention_window_present_in_default_run() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+
+    server
+        .mock("GET", "/")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("{}")
+        .create();
+
+    mock_retention_ledgers(&mut server, RETENTION_LATEST, Some(980_000));
+
+    let report = DiagnosticReport::run_all(&url, Duration::from_secs(5), None, 1).await;
+
+    assert_eq!(report.checks.len(), 13);
+    let check = find_check(&report, "retentionWindow");
+    assert_eq!(check.status, CheckStatus::Pass);
 }
