@@ -24,6 +24,25 @@ This project ships **two decoupled version numbers**:
   Consumers MUST read `schema_version` and MUST ignore fields they do not
   recognize.
 
+## [0.6.0] - 2026-11-27
+
+### Added
+- Built-in `retentionWindow` check: derives the endpoint's ledger
+  retention window from `getLedgers` (`latestLedger` minus
+  `oldestLedger`) and reports `retained_ledgers` plus
+  `retained_days_approx` (retained / 17280, ≈ 5 s per ledger) in
+  `details`. New flag `--min-retention <N>` (default 17280 ledgers,
+  ≈ 1 day). Retained ledgers at or below the threshold report `Warn`
+  (inclusive boundary); above it, `Pass`. A response with no usable
+  `oldestLedger` is a `Skip` (the window cannot be computed), not a
+  Fail. Unlike `contractTtl`, the check runs by default — default runs
+  now have 13 checks. The default threshold was measured live:
+  Testnet retains ~120,959 ledgers (~7.0 days), Futurenet ~31,346
+  (~1.8 days); Futurenet's whole history is only ~31k ledgers, so any
+  threshold above that would Warn on a healthy official network, while
+  17280 clears both with margin. Mainnet was unmeasurable from the
+  build VM at measurement time (transport failure).
+
 ## [0.5.0] - 2026-11-27
 
 ### Added

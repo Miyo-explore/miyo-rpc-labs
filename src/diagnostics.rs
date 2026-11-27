@@ -280,6 +280,26 @@ pub const GET_TRANSACTIONS_PAGE_LIMIT: u64 = 2;
 /// `Warn`; the boundary is inclusive.
 pub const DEFAULT_TTL_THRESHOLD: u64 = 17280;
 
+/// Ledgers per day at ~5 s per ledger close (17280). The unit the
+/// `retentionWindow` check reports `retained_days_approx` in, and the
+/// value of [`DEFAULT_MIN_RETENTION`].
+pub const LEDGERS_PER_DAY: u64 = 17_280;
+
+/// Default minimum-retention threshold in ledgers for the
+/// `retentionWindow` check (17280 ≈ 1 day). Retained ledgers at or
+/// below this threshold report `Warn`; the boundary is inclusive.
+///
+/// Measured live 2026-11-27: Testnet retains ~120,959 ledgers
+/// (~7.0 days), Futurenet ~31,346 (~1.8 days). Futurenet's whole
+/// history is only ~31k ledgers, so any threshold above that would
+/// Warn on a healthy official network; 17280 clears both with margin
+/// while still catching an endpoint that keeps less than a day of
+/// history. Mainnet was unmeasurable from this VM at measurement time
+/// (transport failure to soroban-mainnet.stellar.org); the threshold
+/// choice does not depend on it, since Futurenet is the binding
+/// constraint. Same 1-day convention as [`DEFAULT_TTL_THRESHOLD`].
+pub const DEFAULT_MIN_RETENTION: u64 = LEDGERS_PER_DAY;
+
 /// Base64-encoded XDR of the `LedgerKey` probed by the built-in
 /// `getLedgerEntries` check: an Account key for the all-zero ed25519 key
 /// (union discriminant 0 = ACCOUNT, key type 0 = ED25519, 32 zero bytes).
@@ -869,6 +889,185 @@ impl RpcCheck for GetLedgersCheck {
                     }
                 }
                 Err(e) => fail_result(method, &endpoint, timestamp, &e, evidence),
+            }
+        })
+    }
+}
+
+/// A built-in check for the endpoint's ledger retention window.
+///
+/// Reuses the data the `getLedgers` check already fetches: it first asks
+/// `getLatestLedger` for the latest sequence, then requests one page of
+/// ledgers (`pagination.limit` = [`GET_LEDGERS_PAGE_LIMIT`], starting at
+/// that ledger) and reads `latestLedger` / `oldestLedger` from the
+/// response. The verdict is `retained_ledgers = latestLedger -
+/// oldestLedger`, reported alongside `retained_days_approx`
+/// (retained / [`LEDGERS_PER_DAY`], ~5 s per ledger).
+///
+/// Verdicts: retained ledgers at or below `--min-retention` (default
+/// [`DEFAULT_MIN_RETENTION`]) report `Warn` — the boundary is inclusive,
+/// consistent with the Warn tier: counted in `ran`, not in `passed`,
+/// exit code unchanged. A response with no usable `oldestLedger` is a
+/// `Skip` (the window cannot be computed), not a Fail. An RPC or
+/// transport error, or a malformed response, is a `Fail` like the other
+/// checks. Runs by default — it needs no new input, unlike
+/// `contractTtl`. It makes two RPC calls per run (`getLatestLedger` +
+/// `getLedgers`), all read-only.
+#[derive(Debug, Clone, Copy)]
+pub struct RetentionWindowCheck {
+    /// Warn threshold in ledgers (inclusive).
+    pub threshold: u64,
+}
+
+impl RpcCheck for RetentionWindowCheck {
+    fn name(&self) -> &str {
+        "retentionWindow"
+    }
+
+    fn run<'a>(
+        &'a self,
+        client: &'a RpcClient,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = CheckResult> + Send + 'a>> {
+        Box::pin(async move {
+            let endpoint = client.sanitized_url();
+            let timestamp = chrono::Utc::now().to_rfc3339();
+            let method = "retentionWindow";
+
+            // 1. Resolve the latest ledger sequence.
+            let sequence = match client.call::<Value>("getLatestLedger", None).await {
+                Ok((_, result)) => match parse_ledger_sequence(&result) {
+                    Some(seq) => seq,
+                    None => {
+                        return fail_result(
+                            method,
+                            &endpoint,
+                            timestamp,
+                            &MiyoError::MalformedStructure(
+                                "getLatestLedger result has no usable 'sequence' field".to_string(),
+                            ),
+                            "Call getLatestLedger to resolve the latest ledger for retentionWindow."
+                                .to_string(),
+                        );
+                    }
+                },
+                Err(e) => {
+                    return fail_result(
+                        method,
+                        &endpoint,
+                        timestamp,
+                        &e,
+                        "Call getLatestLedger to resolve the latest ledger for retentionWindow before calling getLedgers."
+                            .to_string(),
+                    );
+                }
+            };
+
+            // 2. Fetch one page of ledgers starting at the latest ledger.
+            let params = serde_json::json!({
+                "startLedger": sequence,
+                "pagination": { "limit": GET_LEDGERS_PAGE_LIMIT },
+            });
+            let evidence = format!(
+                "Sent JSON-RPC 2.0 POST to {endpoint} with method 'getLedgers' and params {{startLedger: {sequence}, pagination: {{limit: {GET_LEDGERS_PAGE_LIMIT}}}}} (startLedger resolved from getLatestLedger)."
+            );
+            let (info, result) = match client.call::<Value>("getLedgers", Some(params)).await {
+                Ok(v) => v,
+                Err(e) => {
+                    return fail_result(method, &endpoint, timestamp, &e, evidence);
+                }
+            };
+            if result.get("ledgers").and_then(Value::as_array).is_none() {
+                return fail_result(
+                    method,
+                    &endpoint,
+                    timestamp,
+                    &MiyoError::MalformedStructure(
+                        "getLedgers result has no 'ledgers' array".to_string(),
+                    ),
+                    evidence,
+                );
+            }
+            let latest = parse_u64_field(&result, "latestLedger").unwrap_or(sequence);
+            let oldest = match parse_u64_field(&result, "oldestLedger") {
+                Some(oldest) => oldest,
+                None => {
+                    return CheckResult {
+                        name: method.to_string(),
+                        status: CheckStatus::Skip,
+                        timestamp,
+                        duration_ms: None,
+                        http_status: None,
+                        endpoint: endpoint.clone(),
+                        details: None,
+                        error: None,
+                        error_message: None,
+                        evidence: Some(
+                            "getLedgers result has no 'oldestLedger' field: the retention window cannot be computed."
+                                .to_string(),
+                        ),
+                    };
+                }
+            };
+
+            // 3. Verdict: retained ledgers at or below the threshold warn;
+            // the boundary is inclusive, consistent with the Warn tier.
+            let retained = latest.saturating_sub(oldest);
+            let retained_days = (retained as f64 / LEDGERS_PER_DAY as f64 * 100.0).round() / 100.0;
+            let status = if retained <= self.threshold {
+                CheckStatus::Warn
+            } else {
+                CheckStatus::Pass
+            };
+
+            let duration_ms = info.duration.as_millis() as u64;
+            let mut details = serde_json::Map::new();
+            details.insert(
+                "description".to_string(),
+                Value::String(
+                    "Ledger retention window (latest minus oldest retained ledger).".to_string(),
+                ),
+            );
+            details.insert(
+                "http_status".to_string(),
+                Value::Number(serde_json::Number::from(info.status)),
+            );
+            details.insert(
+                "latest_ledger".to_string(),
+                Value::Number(serde_json::Number::from(latest)),
+            );
+            details.insert(
+                "oldest_ledger".to_string(),
+                Value::Number(serde_json::Number::from(oldest)),
+            );
+            details.insert(
+                "retained_ledgers".to_string(),
+                Value::Number(serde_json::Number::from(retained)),
+            );
+            details.insert(
+                "retained_days_approx".to_string(),
+                Value::Number(
+                    serde_json::Number::from_f64(retained_days).expect("retained days is finite"),
+                ),
+            );
+            details.insert(
+                "min_retention".to_string(),
+                Value::Number(serde_json::Number::from(self.threshold)),
+            );
+
+            CheckResult {
+                name: method.to_string(),
+                status,
+                timestamp,
+                duration_ms: Some(duration_ms),
+                http_status: Some(info.status),
+                endpoint: endpoint.clone(),
+                details: Some(details),
+                error: None,
+                error_message: None,
+                evidence: Some(format!(
+                    "Checked retention window: getLatestLedger (latest {sequence}), getLedgers starting at {sequence} (oldestLedger {oldest}, latestLedger {latest}): {retained} ledgers retained (~{retained_days} days); threshold {} ledgers.",
+                    self.threshold
+                )),
             }
         })
     }
@@ -2196,13 +2395,19 @@ fn fail_result(
 /// params (see [`GetFeeStatsCheck`]); `getTransaction` fetches the first
 /// transaction of the latest ledger by hash (see [`GetTransactionCheck`]);
 /// `simulateTransaction` replays an embedded Testnet probe transaction
-/// (see [`SimulateTransactionCheck`]).
+/// (see [`SimulateTransactionCheck`]); `retentionWindow` derives the
+/// retained-ledger window from `getLedgers` (see [`RetentionWindowCheck`]).
 ///
 /// `contractTtl` is NOT in this list: it only runs when a contract was
 /// supplied (`--contract`) or explicitly requested (`--method
-/// contractTtl`) — see [`all_checks_with_ttl`]. Default runs therefore
-/// keep exactly the 12 checks they had before the TTL check existed.
+/// contractTtl`) — see [`all_checks_with_options`]. Default runs therefore
+/// keep exactly the 13 checks they had before the TTL check existed.
 pub fn all_checks() -> Vec<Box<dyn RpcCheck + Send + Sync>> {
+    all_checks_with_retention(DEFAULT_MIN_RETENTION)
+}
+
+/// The default check list with an explicit `retentionWindow` threshold.
+fn all_checks_with_retention(threshold: u64) -> Vec<Box<dyn RpcCheck + Send + Sync>> {
     vec![
         Box::new(SimpleMethodCheck {
             method_name: "getHealth",
@@ -2227,6 +2432,7 @@ pub fn all_checks() -> Vec<Box<dyn RpcCheck + Send + Sync>> {
         Box::new(GetEventsCheck),
         Box::new(GetLedgerEntriesCheck),
         Box::new(GetLedgersCheck),
+        Box::new(RetentionWindowCheck { threshold }),
         Box::new(GetTransactionsCheck),
         Box::new(GetFeeStatsCheck),
         Box::new(GetTransactionCheck),
@@ -2234,18 +2440,23 @@ pub fn all_checks() -> Vec<Box<dyn RpcCheck + Send + Sync>> {
     ]
 }
 
-/// The default check list plus the `contractTtl` check, when it applies.
+/// The default check list plus the `contractTtl` check, when it applies,
+/// with the `retentionWindow` threshold overridden when given.
 ///
 /// The TTL check is appended when a contract was supplied (`ttl` is
 /// `Some`) or when it was explicitly requested (`method_filter` is
 /// `Some("contractTtl")` — in which case it runs unconfigured and
 /// reports `Skip`). Otherwise the list is exactly [`all_checks`], so
-/// default runs keep their 12 checks.
-pub fn all_checks_with_ttl(
+/// default runs keep their 13 checks. `retention_threshold` overrides
+/// [`DEFAULT_MIN_RETENTION`] for the `retentionWindow` check; `None`
+/// keeps the default.
+pub fn all_checks_with_options(
     ttl: Option<TtlCheckConfig>,
     method_filter: Option<&str>,
+    retention_threshold: Option<u64>,
 ) -> Vec<Box<dyn RpcCheck + Send + Sync>> {
-    let mut checks = all_checks();
+    let mut checks =
+        all_checks_with_retention(retention_threshold.unwrap_or(DEFAULT_MIN_RETENTION));
     if ttl.is_some() || method_filter == Some("contractTtl") {
         checks.push(Box::new(ContractTtlCheck {
             contract_id: ttl.map(|t| t.contract_id),
@@ -2264,6 +2475,7 @@ pub const BUILTIN_METHODS: &[&str] = &[
     "getEvents",
     "getLedgerEntries",
     "getLedgers",
+    "retentionWindow",
     "getTransactions",
     "getFeeStats",
     "getTransaction",
@@ -2440,21 +2652,25 @@ impl DiagnosticReport {
         method_filter: Option<&str>,
         runs: usize,
     ) -> Self {
-        Self::run_all_with_config_and_contract(url, config, method_filter, runs, None).await
+        Self::run_all_with_config_and_contract(url, config, method_filter, runs, None, None).await
     }
 
-    /// Run all diagnostic checks with an explicit [`RpcClientConfig`] and
-    /// an optional TTL check configuration.
+    /// Run all diagnostic checks with an explicit [`RpcClientConfig`],
+    /// an optional TTL check configuration, and an optional
+    /// `retentionWindow` threshold override.
     ///
     /// Same as [`run_all_with_config`](Self::run_all_with_config), but
     /// when `ttl` is `Some` the `contractTtl` check runs against that
-    /// contract (see [`all_checks_with_ttl`]).
+    /// contract (see [`all_checks_with_options`]), and when
+    /// `retention_threshold` is `Some` it overrides
+    /// [`DEFAULT_MIN_RETENTION`] for the `retentionWindow` check.
     pub async fn run_all_with_config_and_contract(
         url: &str,
         config: RpcClientConfig,
         method_filter: Option<&str>,
         runs: usize,
         ttl: Option<TtlCheckConfig>,
+        retention_threshold: Option<u64>,
     ) -> Self {
         let endpoint = sanitize_url(url);
         let timeout = config.timeout;
@@ -2466,18 +2682,19 @@ impl DiagnosticReport {
                 // Can't even build a client — every check fails.
                 let timestamp = chrono::Utc::now().to_rfc3339();
 
-                let mut checks: Vec<CheckResult> = all_checks_with_ttl(ttl, method_filter)
-                    .iter()
-                    .map(|c| {
-                        fail_result(
-                            c.name(),
-                            &endpoint,
-                            timestamp.clone(),
-                            &e,
-                            format!("Build RpcClient for {endpoint}."),
-                        )
-                    })
-                    .collect();
+                let mut checks: Vec<CheckResult> =
+                    all_checks_with_options(ttl, method_filter, retention_threshold)
+                        .iter()
+                        .map(|c| {
+                            fail_result(
+                                c.name(),
+                                &endpoint,
+                                timestamp.clone(),
+                                &e,
+                                format!("Build RpcClient for {endpoint}."),
+                            )
+                        })
+                        .collect();
 
                 // Also add HTTP connectivity as a check.
                 checks.insert(
@@ -2504,7 +2721,7 @@ impl DiagnosticReport {
             let mut run_results: Vec<CheckResult> =
                 vec![http_connectivity_check(url, timeout, &user_agent, follow_redirects).await];
 
-            let checks = all_checks_with_ttl(ttl, method_filter);
+            let checks = all_checks_with_options(ttl, method_filter, retention_threshold);
             for check in &checks {
                 if let Some(m) = method_filter {
                     if m != check.name() {
@@ -3716,7 +3933,7 @@ mod tests {
         assert_eq!(GetEventsCheck.name(), "getEvents");
         assert_eq!(GET_EVENTS_PAGE_LIMIT, 10);
         assert!(is_builtin_method("getEvents"));
-        assert_eq!(BUILTIN_METHODS.len(), 12);
+        assert_eq!(BUILTIN_METHODS.len(), 13);
         let checks = all_checks();
         let names: Vec<&str> = checks.iter().map(|c| c.name()).collect();
         assert_eq!(
@@ -3729,6 +3946,7 @@ mod tests {
                 "getEvents",
                 "getLedgerEntries",
                 "getLedgers",
+                "retentionWindow",
                 "getTransactions",
                 "getFeeStats",
                 "getTransaction",

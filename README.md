@@ -66,6 +66,7 @@ method check in isolation (the HTTP connectivity check always runs regardless).
 | `getEvents`        | `getEvents`       | Contract events in the latest ledger (one page of 10, no filters).|
 | `getLedgerEntries` | `getLedgerEntries`| Ledger entries for a fixed probe key (one synthetic Account key).  |
 | `getLedgers`       | `getLedgers`      | Ledger headers from the latest ledger (one page of 2).             |
+| `retentionWindow`  | `getLedgers`      | Retained-ledger window (latest minus oldest ledger); Warns at/below `--min-retention` (default 17280). |
 | `getTransactions`  | `getTransactions` | Transactions in the latest ledger (one page of 2).                 |
 | `getFeeStats`      | `getFeeStats`     | Fee statistics for recent ledgers (inclusion fee percentiles).     |
 | `getTransaction`   | `getTransaction`  | Single transaction by hash (first transaction in the latest ledger).|

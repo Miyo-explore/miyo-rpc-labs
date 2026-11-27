@@ -18,6 +18,7 @@ method check in isolation (the HTTP connectivity check always runs regardless).
 | `getEvents`        | `getEvents`       | Contract events in the latest ledger (one page of 10, no filters).|
 | `getLedgerEntries` | `getLedgerEntries`| Ledger entries for a fixed probe key (one synthetic Account key).  |
 | `getLedgers`       | `getLedgers`      | Ledger headers from the latest ledger (one page of 2).             |
+| `retentionWindow`  | `getLedgers`      | Retained-ledger window (latest minus oldest ledger); Warns at/below `--min-retention` (default 17280). |
 | `getTransactions`  | `getTransactions` | Transactions in the latest ledger (one page of 2).                 |
 | `getFeeStats`      | `getFeeStats`     | Fee statistics for recent ledgers (inclusion fee percentiles).     |
 | `getTransaction`   | `getTransaction`  | Single transaction by hash (first transaction in the latest ledger).|
@@ -45,7 +46,12 @@ method check in isolation (the HTTP connectivity check always runs regardless).
   never changes the exit code — only `Fail` exits `1`. `contractTtl`
   reports `Warn` instead of `Pass` when the smallest remaining value
   (instance or code) is at or below `--ttl-threshold` (default 17280
-  ledgers, ≈ 1 day); the boundary is inclusive.
+  ledgers, ≈ 1 day); the boundary is inclusive. `retentionWindow`
+  reports `Warn` instead of `Pass` when the retained ledgers
+  (`latestLedger` minus `oldestLedger`) are at or below
+  `--min-retention` (default 17280 ledgers, ≈ 1 day); the boundary is
+  inclusive. A response with no usable `oldestLedger` is a `Skip` — the
+  window cannot be computed — not a Fail.
 - **Skip** — the check was not attempted (for example, because `--method`
   selected a different check). `contractTtl` Skips when it was explicitly
   requested (`--method contractTtl`) but no `--contract` was given; with

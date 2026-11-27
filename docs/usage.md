@@ -29,9 +29,10 @@ miyo-rpc check --help
 | `--url <URL>`      | `-u`  | _required_ | The Stellar JSON-RPC endpoint URL to diagnose.                       |
 | `--output <FMT>`   | `-o`  | `human`   | `human` (colored terminal) or `json`. Colors are off when `NO_COLOR` is set to a non-empty value or stdout is not a terminal. |
 | `--timeout-secs`   | `-t`  | `15`      | Maximum time to wait per HTTP request.                               |
-| `--method <NAME>`  | `-m`  | _(none)_  | Run only the named JSON-RPC method. For a built-in check (`getHealth`, `getNetwork`, `getLatestLedger`, `getVersionInfo`, `getEvents`, `getLedgerEntries`, `getLedgers`, `getTransactions`, `getFeeStats`, `getTransaction`, `simulateTransaction`, `contractTtl`) the enriched check runs; for any other name a single arbitrary-method probe runs with `--params`. The HTTP connectivity check (`httpConnectivity`) always runs regardless of this flag. `--method contractTtl` requires `--contract` (exit code `2` otherwise). |
-| `--contract <ID>` |       | _(none)_  | Contract ID (strkey `C...`, 56 characters) whose instance and code TTL to check. The `contractTtl` check only runs when this is given; without it, default runs keep 12 checks. The ID is validated (format + checksum) before any request is sent; a malformed ID exits `2`. |
+| `--method <NAME>`  | `-m`  | _(none)_  | Run only the named JSON-RPC method. For a built-in check (`getHealth`, `getNetwork`, `getLatestLedger`, `getVersionInfo`, `getEvents`, `getLedgerEntries`, `getLedgers`, `retentionWindow`, `getTransactions`, `getFeeStats`, `getTransaction`, `simulateTransaction`, `contractTtl`) the enriched check runs; for any other name a single arbitrary-method probe runs with `--params`. The HTTP connectivity check (`httpConnectivity`) always runs regardless of this flag. `--method contractTtl` requires `--contract` (exit code `2` otherwise). |
+| `--contract <ID>` |       | _(none)_  | Contract ID (strkey `C...`, 56 characters) whose instance and code TTL to check. The `contractTtl` check only runs when this is given; without it, default runs keep 13 checks. The ID is validated (format + checksum) before any request is sent; a malformed ID exits `2`. |
 | `--ttl-threshold <N>` | | `17280` | TTL threshold in ledgers for the `contractTtl` check (17280 ≈ 1 day). Remaining ledgers at or below this threshold report `Warn` (inclusive). Only applies when `--contract` is given; ignored otherwise (warning on stderr). |
+| `--min-retention <N>` | | `17280` | Minimum-retention threshold in ledgers for the `retentionWindow` check (17280 ≈ 1 day). Retained ledgers at or below this threshold report `Warn` (inclusive). Applies to every run: `retentionWindow` needs no `--contract`. |
 | `--params <JSON>`  |       | _(none)_  | JSON-RPC `params` for an arbitrary-method probe: a JSON object, array, or `null`. Must be valid JSON, or the CLI exits `2` before any request is sent. Raw params are never echoed in output. Only applies when `--method` names a non-built-in method; otherwise the params are ignored (warning on stderr). |
 | `--params-file <FILE>` |  | _(none)_ | Read JSON-RPC `params` from a file (same JSON rules as `--params`). Only applies when `--method` names a non-built-in method; otherwise the params are ignored (warning on stderr). |
 | `--runs <N>`       | `-n`  | `1`       | Number of diagnostic runs to perform. Clamped to the range `[1, 10]` by the CLI. With N ≥ 2, `getLatestLedger` reports `Warn` (not `Pass`) when the ledger is stagnant or inconsistent across runs; see [Checks](checks.md). |
@@ -47,7 +48,7 @@ miyo-rpc check --help
 > always runs, regardless of `--method`. The flag only filters the
 > **JSON-RPC method checks** (`getHealth`, `getNetwork`, `getLatestLedger`,
 > `getVersionInfo`, `getEvents`, `getLedgerEntries`, `getLedgers`,
-> `getTransactions`, `getFeeStats`, `getTransaction`,
+> `retentionWindow`, `getTransactions`, `getFeeStats`, `getTransaction`,
 > `simulateTransaction`, `contractTtl`). Method checks that do not match are reported as `SKIP`
 > with `evidence` set to `"Skipped: --method filter does not match this
 > check."`. (`contractTtl` is only in the list when `--contract` is given
