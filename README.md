@@ -15,6 +15,7 @@ endpoint verification toolkit.
 - [Supported Checks](#supported-checks)
 - [Installation](#installation)
 - [Usage](#usage)
+- [CI integration](#ci-integration)
 - [Documentation](#documentation)
 - [Used by](#used-by)
 - [Contributing](#contributing)
@@ -110,6 +111,54 @@ miyo-rpc check --help
 
 Full flag reference, exit codes, and output notes:
 [docs/usage.md](docs/usage.md).
+
+## CI integration
+
+Use `miyo-rpc check` as a health gate in CI: the command exits `1` when any
+check fails, which fails the job. Minimal example
+(`.github/workflows/rpc-health.yml`):
+
+```yaml
+name: RPC endpoint health
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  rpc-health:
+    name: Check Testnet Soroban RPC
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      MIYO_RPC_VERSION: "0.5.0"
+      RPC_URL: https://soroban-testnet.stellar.org
+    steps:
+      - name: Download miyo-rpc
+        run: |
+          set -euo pipefail
+          target=x86_64-unknown-linux-gnu
+          base="https://github.com/Miyo-explore/miyo-rpc-labs/releases/download/v${MIYO_RPC_VERSION}"
+          curl -fsSL "${base}/miyo-rpc-v${MIYO_RPC_VERSION}-${target}.tar.gz" -o "miyo-rpc-v${MIYO_RPC_VERSION}-${target}.tar.gz"
+          curl -fsSL "${base}/miyo-rpc-v${MIYO_RPC_VERSION}-${target}.tar.gz.sha256" -o "miyo-rpc-v${MIYO_RPC_VERSION}-${target}.tar.gz.sha256"
+          sha256sum -c "miyo-rpc-v${MIYO_RPC_VERSION}-${target}.tar.gz.sha256"
+          tar -xzf "miyo-rpc-v${MIYO_RPC_VERSION}-${target}.tar.gz"
+          ./miyo-rpc --version
+      - name: Check endpoint health
+        run: ./miyo-rpc check --url "${RPC_URL}" --expected-network testnet --output json
+```
+
+- The check exits `0` when every check passes and `1` when any check
+  fails; a `Warn`-only run still exits `0` (see [docs/usage.md](docs/usage.md)).
+- The binary is pinned to a release and verified against its published
+  sha256 sidecar, so the gate is reproducible and never compiles from
+  source on every run. Bump `MIYO_RPC_VERSION` to upgrade.
+- If the endpoint is public and outside your control, prefer a scheduled
+  run over a gate on every push: an unhealthy public endpoint should not
+  break unrelated PRs. See the scheduled workflows in
+  [4evergent](https://github.com/naninu123/4evergent/blob/main/.github/workflows/rpc-health.yml)
+  and [soroban-devkit](https://github.com/SaboLabs/soroban-devkit/blob/main/.github/workflows/rpc-health.yml).
 
 ## Documentation
 
