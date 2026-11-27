@@ -91,13 +91,14 @@ benchmarking) are documented in the README "Limitations" section.
 
 ## 4. Current State and Gap Analysis
 
-### What exists today (verified in `main` @ 0b4ecaf — PR #50 merged; latest release `v0.5.0`)
+### What exists today (verified in `main` @ 02214cb — PR #53 merged; latest release `v0.6.0`)
 
 | Capability | Status | Evidence |
 |------------|--------|----------|
 | HTTP connectivity check | Implemented | `src/diagnostics.rs:227` |
-| `getHealth`, `getNetwork`, `getLatestLedger`, `getVersionInfo`, `getEvents`, `getLedgerEntries`, `getLedgers`, `getTransactions`, `getFeeStats`, `getTransaction`, `simulateTransaction`, `contractTtl` method checks | Implemented | `src/diagnostics.rs:524` |
+| `getHealth`, `getNetwork`, `getLatestLedger`, `getVersionInfo`, `getEvents`, `getLedgerEntries`, `getLedgers`, `retentionWindow`, `getTransactions`, `getFeeStats`, `getTransaction`, `simulateTransaction`, `contractTtl` method checks | Implemented | `src/diagnostics.rs:524` |
 | `contractTtl` — contract instance + code TTL via `getLedgerEntries` (`--contract <C...>`, `--ttl-threshold`, default 17280; Warn at/below threshold, inclusive) | Implemented | `src/diagnostics.rs`, `src/cli.rs` |
+| `retentionWindow` — ledger retention window via `getLedgers` (`--min-retention`, default 17280; Warn at/below threshold, inclusive; Skip when `oldestLedger` is missing) | Implemented | `src/diagnostics.rs`, `src/cli.rs` |
 | Worst-status aggregation (`Fail > Warn > Skip > Pass`) | Implemented | `src/diagnostics.rs:34` |
 | Repeated runs (`--runs`, clamped `[1, 10]`) | Implemented | `src/cli.rs:64`, `src/diagnostics.rs:414` |
 | Latency statistics (min/avg/max/run_count) | Implemented | `src/diagnostics.rs:516-532` |

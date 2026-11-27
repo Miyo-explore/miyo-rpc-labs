@@ -133,7 +133,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      MIYO_RPC_VERSION: "0.5.0"
+      MIYO_RPC_VERSION: "0.6.0"
       RPC_URL: https://soroban-testnet.stellar.org
     steps:
       - name: Download miyo-rpc
